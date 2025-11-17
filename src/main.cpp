@@ -19,8 +19,23 @@ static bool mpu_ok = false;
 static bool dht_ok = false;
 static bool dht_failure = true;
 static uint32_t dht_err_count = 0;
+static uint32_t dht_fail_consec = 0;
+static bool dht_have_last = false;
+static float dht_last_tC = NAN, dht_last_h = NAN;
 static float last_gx = 0, last_gy = 0, last_gz = 0;
 static uint32_t mpu_change_until = 0; // keep LED blue until this time if change detected
+
+static bool dht_read_retry(float &tC, float &hPct, int attempts=3, uint32_t gapMs=60) {
+  for (int i=0;i<attempts;++i) {
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+    if (!isnan(h) && !isnan(t)) {
+      tC = t; hPct = h; return true;
+    }
+    if (i+1 < attempts) delay(gapMs);
+  }
+  return false;
+}
 
 static void i2c_scan_once() {
   Serial.println("I2C scan...");
@@ -70,16 +85,30 @@ void loop() {
   
   uint32_t now = millis();
 
-  // DHT11 every 2000 ms (per device spec, min ~2s)
-  if (now - t_dht > 4000) {
+  // DHT11 every 2500 ms (spec min ~2s; a bit more can help stability)
+  if (now - t_dht >= 2500) {
     t_dht = now;
-    float h = dht.readHumidity();
-    float t = dht.readTemperature();
-    bool ok = !(isnan(h) || isnan(t));
-    dht_ok = ok; if (!ok) { dht_err_count++; } else { dht_err_count = 0; dht_failure = false; }
+    float h = NAN, t = NAN;
+    bool ok = dht_read_retry(t, h, 2, 80);
+    dht_ok = ok;
+    if (!ok) {
+      dht_err_count++;
+      dht_fail_consec++;
+    } else {
+      dht_err_count = 0;
+      dht_fail_consec = 0;
+      dht_failure = false;
+      dht_last_tC = t; dht_last_h = h; dht_have_last = true;
+    }
     char line0[17];
-    if (ok) snprintf(line0, sizeof(line0), "T:%dC H:%d%%", (int)roundf(t), (int)roundf(h));
-    else snprintf(line0, sizeof(line0), "DHT ERR %lu", (unsigned long)dht_err_count);
+    if (ok) {
+      snprintf(line0, sizeof(line0), "T:%dC H:%d%%", (int)roundf(t), (int)roundf(h));
+    } else if (dht_have_last && dht_fail_consec < 3) {
+      // Show last known good reading for up to 2 consecutive failures
+      snprintf(line0, sizeof(line0), "T:%dC H:%d%%", (int)roundf(dht_last_tC), (int)roundf(dht_last_h));
+    } else {
+      snprintf(line0, sizeof(line0), "DHT ERR %lu", (unsigned long)dht_err_count);
+    }
     // Pad to 16
     int l=strlen(line0); while(l<16) line0[l++]=' '; line0[16]='\0';
     lcd.setCursor(0,0); lcd.print(line0);
