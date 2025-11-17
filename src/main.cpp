@@ -6,14 +6,29 @@
 #include <DHT.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ThreeWire.h>
+#include <RtcDS1302.h>
 #include "pins.hpp"
-#include "ds1302.hpp"
-#include "status_led.hpp"
+#include <stdint.h>
 
 static LiquidCrystal_I2C lcd(I2CAddr::LCD, 16, 2);
 static DHT dht(Pins::DHT, DHT11);
 static Adafruit_MPU6050 mpu;
 static bool mpu_ok = false;
+static ThreeWire ds1302Bus(Pins::DS1302_DAT, Pins::DS1302_CLK, Pins::DS1302_RST);
+static RtcDS1302<ThreeWire> Rtc(ds1302Bus);
+
+// WiFi / MQTT configuration (set your credentials & broker)
+static const char* WIFI_SSID = "YOUR_SSID";
+static const char* WIFI_PASS = "YOUR_PASSWORD";
+static const char* MQTT_HOST = "broker.example.com";
+static const uint16_t MQTT_PORT = 1883;
+static const char* MQTT_CLIENT_ID = "cyclecomputer";
+static const char* MQTT_TOPIC = "cyclecomputer/telemetry";
+static WiFiClient wifiClient;
+static PubSubClient mqtt(wifiClient);
 
 // Event/state
 static bool dht_ok = false;
@@ -24,6 +39,26 @@ static bool dht_have_last = false;
 static float dht_last_tC = NAN, dht_last_h = NAN;
 static float last_gx = 0, last_gy = 0, last_gz = 0;
 static uint32_t mpu_change_until = 0; // keep LED blue until this time if change detected
+
+// Inline LED helper (3-pin RGB, active HIGH per pins.hpp)
+static void LedBegin(){
+  pinMode(Pins::LED_R, OUTPUT);
+  pinMode(Pins::LED_G, OUTPUT);
+  pinMode(Pins::LED_B, OUTPUT);
+  digitalWrite(Pins::LED_R, LOW);
+  digitalWrite(Pins::LED_G, LOW);
+  digitalWrite(Pins::LED_B, LOW);
+}
+static void LedSet(bool r,bool g,bool b){
+  digitalWrite(Pins::LED_R, r?HIGH:LOW);
+  digitalWrite(Pins::LED_G, g?HIGH:LOW);
+  digitalWrite(Pins::LED_B, b?HIGH:LOW);
+}
+static void LedSetIdle(){ LedSet(false,true,false); }
+static void LedForceRed(){ LedSet(true,false,false); }
+static void LedForceBlue(){ LedSet(false,false,true); }
+static void LedForceGreen(){ LedSetIdle(); }
+static void LedUpdate(){}
 
 static bool dht_read_retry(float &tC, float &hPct, int attempts=3, uint32_t gapMs=60) {
   for (int i=0;i<attempts;++i) {
@@ -41,17 +76,51 @@ static void i2c_scan_once() {
   Serial.println("I2C scan...");
   for (uint8_t a=1;a<127;++a){ Wire.beginTransmission(a); if (Wire.endTransmission()==0) Serial.printf(" - 0x%02X\n", a);} }
 
+static void wifi_connect() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  Serial.printf("WiFi connecting to %s...\n", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < 15000) {
+    delay(300);
+    Serial.print('.');
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("WiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("WiFi connect failed (timeout)");
+  }
+}
+
+static void mqtt_connect() {
+  if (mqtt.connected()) return;
+  Serial.printf("MQTT connecting to %s:%u...\n", MQTT_HOST, MQTT_PORT);
+  uint8_t attempts = 0;
+  while (!mqtt.connected() && attempts < 5) {
+    if (mqtt.connect(MQTT_CLIENT_ID)) {
+      Serial.println("MQTT connected");
+      break;
+    } else {
+      Serial.printf("MQTT connect failed rc=%d; retrying...\n", mqtt.state());
+      attempts++;
+      delay(2000);
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200); delay(300);
   Wire.begin(Pins::SDA, Pins::SCL); Wire.setClock(100000);
-  StatusLed::begin();
+  LedBegin();
   lcd.init();
   lcd.backlight();
   lcd.setCursor(0,0); lcd.print("CycleComputer  ");
   lcd.setCursor(0,1); lcd.print("Init...         ");
 
   dht.begin();
-  DS1302::begin();
+  Rtc.Begin();
 
   // Set RTC to compile time once per firmware upload using NVS build signature
   {
@@ -60,7 +129,8 @@ void setup() {
     String buildSig = String(__DATE__) + " " + String(__TIME__);
     String prevSig = prefs.getString("buildSig", "");
     if (prevSig != buildSig) {
-      DS1302::setCompileTime();
+      RtcDateTime dt(__DATE__, __TIME__);
+      Rtc.SetDateTime(dt);
       prefs.putString("buildSig", buildSig);
       Serial.println("RTC set to compile time (first boot after upload)");
     }
@@ -76,12 +146,17 @@ void setup() {
   }
   Serial.printf("MPU6050 %s at 0x%02X\n", mpu_ok?"OK":"N/A", I2CAddr::MPU);
 
+  // WiFi + MQTT init
+  wifi_connect();
+  mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  mqtt_connect();
+
   i2c_scan_once();
-  StatusLed::setIdle();
+  LedSetIdle();
 }
 
 void loop() {
-  static uint32_t t_dht = 0, t_rtc = 0, t_idle = 0;
+  static uint32_t t_dht = 0, t_rtc = 0, t_idle = 0, t_pub = 0;
   
   uint32_t now = millis();
 
@@ -132,14 +207,33 @@ void loop() {
 
   // RTC date+time to LCD line 1 once per second (HH:MM:SSDD/MM/YY fits 16 chars)
   if (now - t_rtc >= 1000) {
-    t_rtc = now; RtcTime rt = DS1302::readTime();
+    t_rtc = now; RtcDateTime rt = Rtc.GetDateTime();
     char line1[17];
-    // Format without space between time and date to fit year in 16 columns
-    snprintf(line1, sizeof(line1), "%02u:%02u:%02u%02u/%02u/%02u", rt.hour, rt.min, rt.sec, rt.date, rt.month, rt.year);
+    uint8_t yy = (uint8_t)(rt.Year() % 100);
+    snprintf(line1, sizeof(line1), "%02u:%02u:%02u%02u/%02u/%02u", rt.Hour(), rt.Minute(), rt.Second(), rt.Day(), rt.Month(), yy);
     // Ensure null termination and full width
     line1[16] = '\0';
     lcd.setCursor(0,1); lcd.print(line1);
   }
+  // MQTT publish every 5s if connected
+  if (mqtt.connected() && (now - t_pub >= 5000)) {
+    t_pub = now;
+    bool motion = (int32_t)(now - mpu_change_until) < 0;
+    char payload[160];
+    int tempOut = dht_have_last ? (int)roundf(dht_last_tC) : -99;
+    int humOut = dht_have_last ? (int)roundf(dht_last_h) : -1;
+    snprintf(payload, sizeof(payload),
+             "{\"tempC\":%d,\"hum%%\":%d,\"motion\":%s,\"dht_fail_consec\":%lu,\"ip\":\"%s\"}",
+             tempOut, humOut, motion?"true":"false", (unsigned long)dht_fail_consec,
+             WiFi.status()==WL_CONNECTED ? WiFi.localIP().toString().c_str() : "0.0.0.0");
+    mqtt.publish(MQTT_TOPIC, payload);
+    Serial.printf("MQTT publish: %s\n", payload);
+  }
+
+  // Service MQTT
+  if (WiFi.status() != WL_CONNECTED) wifi_connect();
+  if (!mqtt.connected()) mqtt_connect();
+  mqtt.loop();
 
   // LED policy:
   // - Red if any failure (DHT read fail this cycle) or dht_err_count > 100
@@ -147,14 +241,13 @@ void loop() {
   // - Else Green (idle)
   bool showRed = dht_failure || (dht_err_count > 100);
   if (showRed) {
-    StatusLed::forceRed();
+    LedForceRed();
   } else if ((int32_t)(now - mpu_change_until) < 0) {
-    StatusLed::forceBlue();
+    LedForceBlue();
   } else {
-    StatusLed::forceGreen();
+    LedForceGreen();
   }
-  // Allow any pending blue pulse to auto-clear
-  StatusLed::update();
+  LedUpdate();
 
   // small idle pacing
   delay(10);

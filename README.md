@@ -2,12 +2,12 @@
 
 ESP32-based bike “cycle computer” demo showing live temperature/humidity, real-time clock, and motion activity on a 16x2 I2C LCD with a simple RGB status LED.
 
-This project uses Arduino framework on ESP32 with common libraries via PlatformIO. It uses `LiquidCrystal_I2C` for the LCD, Adafruit `DHT` and `Adafruit Unified Sensor` for DHT11, and `Adafruit MPU6050` for the accelerometer. The DS1302 RTC currently uses a small custom driver.
+This project uses Arduino framework on ESP32 with common libraries via PlatformIO. It uses `LiquidCrystal_I2C` for the LCD, Adafruit `DHT` and `Adafruit Unified Sensor` for DHT11, `Adafruit MPU6050` for the accelerometer, and `makuna/RTC` for the DS1302 RTC.
 
 ## Features
 
 - Temperature and humidity from `DHT11` every ~2 seconds
-- Real-time clock via `DS1302` (3‑wire), auto-set to firmware build time after upload
+- Real-time clock via `DS1302` (3‑wire, via makuna/RTC), auto-set to firmware build time after upload
 - Motion/change indication from `MPU6050` accelerometer (INT or 100 ms poll fallback)
 - 16x2 LCD (I2C, address `0x27` by default) shows:
   - Line 1: `T:##C H:##%` or `DHT ERR <count>`
@@ -17,6 +17,7 @@ This project uses Arduino framework on ESP32 with common libraries via PlatformI
   - Blue: brief pulse while motion change is detected
   - Green: idle/OK
 - One-time I2C scan at boot printed to Serial (115200 baud)
+- Optional MQTT telemetry publish (WiFi + broker) every 5s
 
 ## Hardware
 
@@ -54,6 +55,8 @@ This is a PlatformIO project using Arduino framework. Required libraries are dec
 - `adafruit/DHT sensor library`
 - `adafruit/Adafruit Unified Sensor`
 - `adafruit/Adafruit MPU6050`
+- `knolleary/PubSubClient` (MQTT client)
+- `makuna/RTC` (DS1302 via ThreeWire)
 
 ### VS Code (recommended)
 
@@ -89,16 +92,14 @@ pio device monitor -b 115200
 - Motion sensitivity: change threshold and blue pulse window in `src/main.cpp`:
   - Threshold: `0.03f g`
   - Blue window: `200 ms`
+- MQTT/WiFi: Edit constants (`WIFI_SSID`, `WIFI_PASS`, `MQTT_HOST`, `MQTT_PORT`, `MQTT_TOPIC`) near top of `src/main.cpp`.
 
 ## Project Structure
 
 ```text
 src/
-  main.cpp         # App logic (sensors, LCD, LED state machine)
+  main.cpp         # App logic (sensors, LCD, LED state machine, WiFi+MQTT)
   pins.hpp         # All pin assignments and I2C addresses
-  ds1302.hpp       # Bit-banged DS1302 RTC driver
-  status_led.hpp   # Simple RGB LED helper
-  status_led.cpp   # Static data definitions
 platformio.ini     # PlatformIO environment (esp32dev, Arduino)
 ```
 
@@ -117,9 +118,23 @@ platformio.ini     # PlatformIO environment (esp32dev, Arduino)
   - Re-upload firmware to set RTC to the new build time.
   - If battery-backed, ensure the cell is fresh.
 
-## Notes
+## MQTT Setup
 
-- The project now relies on standard libraries (see Build & Flash). The DS1302 RTC still uses a custom helper in `src/ds1302.hpp`.
+- Set WiFi and broker details in `src/main.cpp` near the top:
+  - `WIFI_SSID`, `WIFI_PASS`
+  - `MQTT_HOST`, `MQTT_PORT`, `MQTT_TOPIC`, `MQTT_CLIENT_ID`
+- Build, upload, and open the serial monitor to confirm WiFi/MQTT connection.
+- Verify messages by subscribing to the topic from your PC:
+
+```powershell
+# Using mosquitto (if installed)
+mosquitto_sub -h <broker-host> -p 1883 -t cyclecomputer/telemetry -v
+```
+
+Notes:
+
+- If your broker requires authentication, change the connect call in `main.cpp` from `mqtt.connect(MQTT_CLIENT_ID)` to `mqtt.connect(MQTT_CLIENT_ID, "USER", "PASS")`.
+- Ensure your firewall allows outbound TCP to the broker’s port.
 
 ---
 Made for coursework/experimentation; adapt pins and devices to your hardware.
