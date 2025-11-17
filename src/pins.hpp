@@ -21,9 +21,12 @@ namespace Pins {
   static const uint8_t DS1302_RST = 18;
   static const uint8_t DS1302_DAT = 5; 
   static const uint8_t DS1302_CLK = 4; 
+
+  // User Button (use GPIO32 with internal pull-up; connect button to GND)
+  static const uint8_t BTN = 32;
 }
 
 namespace I2CAddr {
-  static const uint8_t LCD = 0x27;     // LCD
+  static const uint8_t LCD = 0x27;   // LCD
   static const uint8_t MPU = 0x68;   // MPU6050
 }
