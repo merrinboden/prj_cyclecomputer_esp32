@@ -2,9 +2,10 @@
 
 ESP32-based bike “cycle computer” demo showing live temperature/humidity, real-time clock, and motion activity on a 16x2 I2C LCD with a simple RGB status LED.
 
-This project is a minimal, dependency-free implementation using the Arduino framework on ESP32. It includes lightweight drivers for an HD44780 LCD (via PCF8574 I2C backpack), DHT11, MPU6050, and DS1302 RTC.
+This project uses Arduino framework on ESP32 with common libraries via PlatformIO. It uses `LiquidCrystal_I2C` for the LCD, Adafruit `DHT` and `Adafruit Unified Sensor` for DHT11, and `Adafruit MPU6050` for the accelerometer. The DS1302 RTC currently uses a small custom driver.
 
 ## Features
+
 - Temperature and humidity from `DHT11` every ~2 seconds
 - Real-time clock via `DS1302` (3‑wire), auto-set to firmware build time after upload
 - Motion/change indication from `MPU6050` accelerometer (INT or 100 ms poll fallback)
@@ -18,6 +19,7 @@ This project is a minimal, dependency-free implementation using the Arduino fram
 - One-time I2C scan at boot printed to Serial (115200 baud)
 
 ## Hardware
+
 - ESP32 DevKit (env: `esp32dev`)
 - DHT11 temperature/humidity sensor (data on GPIO 23)
 - MPU6050 accelerometer (I2C at `0x68`, INT on GPIO 19)
@@ -26,6 +28,7 @@ This project is a minimal, dependency-free implementation using the Arduino fram
 - Common‑anode/cathode RGB LED with series resistors (active HIGH expected)
 
 ### Pinout (from `src/pins.hpp`)
+
 - I2C `SDA`: `GPIO 21`
 - I2C `SCL`: `GPIO 22`
 - DHT11 `DATA`: `GPIO 23`
@@ -34,18 +37,26 @@ This project is a minimal, dependency-free implementation using the Arduino fram
 - DS1302: `RST=GPIO 18`, `DAT=GPIO 5`, `CLK=GPIO 4`
 
 ### I2C Addresses (from `src/pins.hpp`)
+
 - LCD: `0x27`
 - MPU6050: `0x68`
 
 Notes:
+
 - Supply and logic levels depend on your modules. Many PCF8574 LCD backpacks work at 5V but are I2C‑level tolerant via pull‑ups; ensure pull‑ups are safe for 3.3V ESP32, or use level shifting as needed.
 - DHT11 supports 3.3V operation; follow its datasheet wiring and timing constraints.
 
 ## Build & Flash
 
-This is a PlatformIO project using Arduino framework.
+This is a PlatformIO project using Arduino framework. Required libraries are declared in `platformio.ini` and will auto-install:
+
+- `marcoschwartz/LiquidCrystal_I2C`
+- `adafruit/DHT sensor library`
+- `adafruit/Adafruit Unified Sensor`
+- `adafruit/Adafruit MPU6050`
 
 ### VS Code (recommended)
+
 - Install the PlatformIO extension.
 - Open this folder in VS Code.
 - Environment: `env:esp32dev` (from `platformio.ini`).
@@ -54,6 +65,7 @@ This is a PlatformIO project using Arduino framework.
 - Open Serial Monitor at `115200` baud to see logs and the I2C scan.
 
 ### PlatformIO CLI (PowerShell)
+
 ```powershell
 pio run
 pio run -t upload
@@ -61,6 +73,7 @@ pio device monitor -b 115200
 ```
 
 ## Behavior
+
 - On first boot after each firmware upload, the RTC is set to the compile time. This is keyed by a stored “build signature” (`Preferences` NVS, key `app/buildSig`). Subsequent normal resets do not rewrite the time.
 - LCD:
   - Line 1 shows DHT data or an incrementing error counter if reads fail.
@@ -69,6 +82,7 @@ pio device monitor -b 115200
 - Serial: I2C device scan results and motion event logs (when change detected).
 
 ## Configuration
+
 - Pins and I2C addresses: `src/pins.hpp`.
 - LCD address: `I2CAddr::LCD` in `src/pins.hpp` (default `0x27`).
 - I2C clock: set in `src/main.cpp` (`Wire.setClock(100000)`).
@@ -77,13 +91,11 @@ pio device monitor -b 115200
   - Blue window: `200 ms`
 
 ## Project Structure
-```
+
+```text
 src/
   main.cpp         # App logic (sensors, LCD, LED state machine)
   pins.hpp         # All pin assignments and I2C addresses
-  lcd.hpp          # Minimal HD44780-over-PCF8574 driver
-  dht11.hpp        # Bit-banged DHT11 reader
-  mpu6050.hpp      # Minimal MPU6050 I2C helper (accel + INT)
   ds1302.hpp       # Bit-banged DS1302 RTC driver
   status_led.hpp   # Simple RGB LED helper
   status_led.cpp   # Static data definitions
@@ -91,6 +103,7 @@ platformio.ini     # PlatformIO environment (esp32dev, Arduino)
 ```
 
 ## Troubleshooting
+
 - LCD shows nothing or gibberish:
   - Verify the I2C address from Serial scan; update `I2CAddr::LCD` if needed.
   - Check contrast trimpot and supply voltage.
@@ -105,7 +118,8 @@ platformio.ini     # PlatformIO environment (esp32dev, Arduino)
   - If battery-backed, ensure the cell is fresh.
 
 ## Notes
-- No external Arduino libraries are required; all device helpers are implemented in `src/` for clarity and portability.
+
+- The project now relies on standard libraries (see Build & Flash). The DS1302 RTC still uses a custom helper in `src/ds1302.hpp`.
 
 ---
 Made for coursework/experimentation; adapt pins and devices to your hardware.

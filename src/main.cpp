@@ -2,17 +2,18 @@
 #include <math.h>
 #include <Preferences.h>
 #include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
 #include "pins.hpp"
-#include "lcd.hpp"
-#include "dht11.hpp"
-#include "mpu6050.hpp"
 #include "ds1302.hpp"
 #include "status_led.hpp"
 
-static Lcd lcd(I2CAddr::LCD);
-static Mpu6050 mpu;
-static volatile bool mpu_data_ready = false; // ISR flag
-static IRAM_ATTR void mpu_isr() { mpu_data_ready = true; }
+static LiquidCrystal_I2C lcd(I2CAddr::LCD, 16, 2);
+static DHT dht(Pins::DHT, DHT11);
+static Adafruit_MPU6050 mpu;
+static bool mpu_ok = false;
 
 // Event/state
 static bool dht_ok = false;
@@ -29,11 +30,12 @@ void setup() {
   Serial.begin(115200); delay(300);
   Wire.begin(Pins::SDA, Pins::SCL); Wire.setClock(100000);
   StatusLed::begin();
-  lcd.begin();
+  lcd.init();
+  lcd.backlight();
   lcd.setCursor(0,0); lcd.print("CycleComputer  ");
   lcd.setCursor(0,1); lcd.print("Init...         ");
 
-  pinMode(Pins::DHT, INPUT_PULLUP);
+  dht.begin();
   DS1302::begin();
 
   // Set RTC to compile time once per firmware upload using NVS build signature
@@ -50,10 +52,14 @@ void setup() {
     prefs.end();
   }
 
-  // MPU init + INT
-  bool mu = mpu.begin();
-  if (mu) { pinMode(Pins::MPU_INT, INPUT); attachInterrupt(digitalPinToInterrupt(Pins::MPU_INT), mpu_isr, RISING); }
-  Serial.printf("MPU6050 %s at 0x%02X\n", mu?"OK":"N/A", mpu.addr());
+  // MPU init (polling)
+  mpu_ok = mpu.begin(I2CAddr::MPU);
+  if (mpu_ok) {
+    mpu.setAccelerometerRange(MPU6050_RANGE_2_G);
+    mpu.setGyroRange(MPU6050_RANGE_250_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_44_HZ);
+  }
+  Serial.printf("MPU6050 %s at 0x%02X\n", mpu_ok?"OK":"N/A", I2CAddr::MPU);
 
   i2c_scan_once();
   StatusLed::setIdle();
@@ -65,29 +71,33 @@ void loop() {
   uint32_t now = millis();
 
   // DHT11 every 2000 ms (per device spec, min ~2s)
-  if (now - t_dht > 2000) {
-    t_dht = now; Dht11Data d{}; bool ok = Dht11::read(d);
+  if (now - t_dht > 4000) {
+    t_dht = now;
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+    bool ok = !(isnan(h) || isnan(t));
     dht_ok = ok; if (!ok) { dht_err_count++; } else { dht_err_count = 0; dht_failure = false; }
     char line0[17];
-    if (ok) snprintf(line0, sizeof(line0), "T:%dC H:%d%%", d.temperature, d.humidity);
+    if (ok) snprintf(line0, sizeof(line0), "T:%dC H:%d%%", (int)roundf(t), (int)roundf(h));
     else snprintf(line0, sizeof(line0), "DHT ERR %lu", (unsigned long)dht_err_count);
     // Pad to 16
     int l=strlen(line0); while(l<16) line0[l++]=' '; line0[16]='\0';
     lcd.setCursor(0,0); lcd.print(line0);
   }
 
-  // MPU read on data-ready or fallback at 100ms
+  // MPU read at 100ms
   static uint32_t t_mpu = 0; bool mpu_event=false;
-  if (mpu.ok() && (mpu_data_ready || (now - t_mpu >= 100))) {
-    mpu_data_ready = false; t_mpu = now;
-    float gx,gy,gz; if (mpu.readAccelG(gx,gy,gz)) {
-      // Detect change beyond 0.03g on any axis
-      if (fabsf(gx-last_gx)>0.03f || fabsf(gy-last_gy)>0.03f || fabsf(gz-last_gz)>0.03f) {
-        mpu_event = true; mpu_change_until = now + 200; // blue LED window
-        last_gx=gx; last_gy=gy; last_gz=gz;
-        // Print MPU only when we trigger blue (change event)
-        Serial.printf("MPU g: %.2f, %.2f, %.2f\n", gx, gy, gz);
-      }
+  if (mpu_ok && (now - t_mpu >= 100)) {
+    t_mpu = now;
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+    float gx = a.acceleration.x / 9.80665f;
+    float gy = a.acceleration.y / 9.80665f;
+    float gz = a.acceleration.z / 9.80665f;
+    if (fabsf(gx-last_gx)>0.03f || fabsf(gy-last_gy)>0.03f || fabsf(gz-last_gz)>0.03f) {
+      mpu_event = true; mpu_change_until = now + 200; // blue LED window
+      last_gx=gx; last_gy=gy; last_gz=gz;
+      Serial.printf("MPU g: %.2f, %.2f, %.2f\n", gx, gy, gz);
     }
   }
 
