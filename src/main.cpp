@@ -30,10 +30,12 @@ static const char* MQTT_TOPIC = "cyclecomputer/telemetry";
 // Optional: set non-empty to use broker auth
 static const char* MQTT_USER = ""; // e.g. "esp32"
 static const char* MQTT_PASS = ""; // e.g. "s3cret"
+static const uint32_t MQTT_BACKOFF_MS = 30000; // backoff after failed connect
 static WiFiClient wifiClient;
 static PubSubClient mqtt(wifiClient);
 // When WiFi is unavailable, suspend MQTT loop/publish attempts to avoid blocking retries
 static bool mqtt_suspended = false;
+static uint32_t mqtt_cooldown_until = 0;
 
 // Event/state
 static bool dht_ok = false;
@@ -50,12 +52,21 @@ static uint32_t next_rtc = 0;
 static uint32_t next_mpu = 0;
 static uint32_t next_mqtt = 0;
 static uint32_t next_connect_check = 0;
+static uint32_t next_motion_page_refresh = 0; // throttles LCD refresh while on Motion page
 // LCD pages
 static uint8_t ui_page = 0; // 0: DHT, 1: Time, 2: Motion, 3: Network
 static const uint8_t ui_pages = 4;
 static char ui_line_dht[17] = "                ";
 static char ui_line_time[17] = "                ";
 static char ui_line_date[17] = "                ";
+// DHT scheduling enhancements
+static uint32_t next_dht_quick = 0;        // quick retry schedule after a failure
+static uint32_t dht_warmup_until = 0;      // time until we start counting errors
+static uint32_t dht_last_ok_ms = 0;        // millis of last successful reading
+// Extended recovery state machine (opportunistic lightweight reads after a failure)
+static uint32_t dht_recovery_until = 0;    // while now < this, perform recovery reads
+static uint32_t next_dht_recovery = 0;     // next scheduled recovery attempt
+static uint8_t dht_recovery_attempts = 0;  // attempts in current recovery window
 
 // Inline LED helper (3-pin RGB, active HIGH per pins.hpp)
 static void LedBegin(){
@@ -160,6 +171,7 @@ void setup() {
 
   dht.begin();
   Rtc.Begin();
+  dht_warmup_until = millis() + 10000; // 10s warm-up ignore error counts
 
   // Set RTC to compile time once per firmware upload using NVS build signature
   {
@@ -189,6 +201,8 @@ void setup() {
   // Start asynchronous WiFi attempt; skip MQTT connect here to prevent blocking before sensors start.
   wifi_connect();
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  mqtt.setSocketTimeout(1);   // seconds; keep connect() from blocking long
+  mqtt.setKeepAlive(30);
 
   i2c_scan_once();
   LedSetIdle();
@@ -206,16 +220,29 @@ void loop() {
     do { next_dht += 2500; } while ((int32_t)(now - next_dht) >= 0);
     Serial.println("[loop] DHT tick");
     float h = NAN, t = NAN;
-    bool ok = dht_read_retry(t, h, 2, 80);
+    bool ok = dht_read_retry(t, h, 2, 40); // reduce blocking; rely on recovery loop
     dht_ok = ok;
     if (!ok) {
-      dht_err_count++;
-      dht_fail_consec++;
+      if (millis() >= dht_warmup_until) {
+        dht_err_count++;
+        dht_fail_consec++;
+      }
+      // schedule a quick retry in 600ms if none pending
+      if (next_dht_quick == 0) next_dht_quick = millis() + 600;
+      // start recovery window (3s) for opportunistic fast single reads
+      if (dht_recovery_until < millis()) {
+        dht_recovery_until = millis() + 3000;
+        next_dht_recovery = millis() + 400; // first recovery attempt
+        dht_recovery_attempts = 0;
+      }
     } else {
       dht_err_count = 0;
       dht_fail_consec = 0;
       dht_failure = false;
       dht_last_tC = t; dht_last_h = h; dht_have_last = true;
+      dht_last_ok_ms = millis();
+      next_dht_quick = 0; // cancel quick retry if any
+      dht_recovery_until = 0; next_dht_recovery = 0; dht_recovery_attempts = 0;
     }
     // Prepare DHT UI line
     if (ok) {
@@ -223,10 +250,65 @@ void loop() {
     } else if (dht_have_last && dht_fail_consec < 3) {
       snprintf(ui_line_dht, sizeof(ui_line_dht), "T:%dC H:%d%%", (int)roundf(dht_last_tC), (int)roundf(dht_last_h));
     } else {
-      snprintf(ui_line_dht, sizeof(ui_line_dht), "DHT ERR %lu", (unsigned long)dht_err_count);
+      // Show error or stale indicator
+      uint32_t age = dht_last_ok_ms ? (millis() - dht_last_ok_ms) : 0;
+      if (dht_have_last && age > 30000) {
+        snprintf(ui_line_dht, sizeof(ui_line_dht), "STALE %lu", (unsigned long)(age/1000));
+      } else {
+        snprintf(ui_line_dht, sizeof(ui_line_dht), "DHT ERR %lu", (unsigned long)dht_err_count);
+      }
     }
     pad16(ui_line_dht);
-    render_display();
+    if (ui_page == 0) render_display();
+  }
+
+  // Quick retry logic (non-aligned, opportunistic) executes only if scheduled and after warm-up
+  if (next_dht_quick != 0 && (int32_t)(now - next_dht_quick) >= 0) {
+    // perform a lightweight single attempt without blocking other tasks
+    next_dht_quick = 0; // clear schedule first to avoid reentrancy
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+    bool ok = !isnan(h) && !isnan(t);
+    if (ok) {
+      dht_ok = true;
+      dht_last_tC = t; dht_last_h = h; dht_have_last = true; dht_last_ok_ms = millis();
+      dht_err_count = 0; dht_fail_consec = 0; dht_failure = false;
+      snprintf(ui_line_dht, sizeof(ui_line_dht), "T:%dC H:%d%%", (int)roundf(t), (int)roundf(h));
+      pad16(ui_line_dht);
+      if (ui_page == 0) render_display();
+    } else {
+      // schedule another quick retry only if we haven't exceeded a short burst (max 2 quick retries between main intervals)
+      static uint8_t quick_retry_count = 0;
+      if (quick_retry_count < 2) {
+        next_dht_quick = millis() + 700;
+        quick_retry_count++;
+      } else {
+        quick_retry_count = 0; // reset for next main interval
+      }
+    }
+  }
+
+  // Recovery state machine: sparse single reads for a short window after a failure
+  if (dht_recovery_until && millis() < dht_recovery_until && next_dht_recovery && (int32_t)(now - next_dht_recovery) >= 0) {
+    next_dht_recovery = 0; // clear before attempt
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+    bool ok = !isnan(h) && !isnan(t);
+    if (ok) {
+      dht_ok = true; dht_last_tC = t; dht_last_h = h; dht_have_last = true; dht_last_ok_ms = millis();
+      dht_err_count = 0; dht_fail_consec = 0; dht_failure = false;
+      snprintf(ui_line_dht, sizeof(ui_line_dht), "T:%dC H:%d%%", (int)roundf(t), (int)roundf(h)); pad16(ui_line_dht);
+      if (ui_page == 0) render_display();
+      dht_recovery_until = 0; dht_recovery_attempts = 0; // end recovery
+    } else {
+      dht_recovery_attempts++;
+      if (dht_recovery_attempts < 5) {
+        next_dht_recovery = millis() + 450; // schedule another quick attempt
+      } else {
+        // stop recovery; wait for next aligned interval
+        dht_recovery_until = 0; dht_recovery_attempts = 0;
+      }
+    }
   }
 
   // MPU read every 100ms aligned
@@ -242,6 +324,11 @@ void loop() {
       mpu_event = true; mpu_change_until = now + 200; // blue LED window
       last_gx=gx; last_gy=gy; last_gz=gz;
       Serial.printf("MPU g: %.2f, %.2f, %.2f\n", gx, gy, gz);
+    }
+    // Refresh motion page either on detected motion change or every 500ms while displayed
+    if (ui_page == 2 && (mpu_event || (int32_t)(now - next_motion_page_refresh) >= 0)) {
+      next_motion_page_refresh = now + 500; // throttle updates
+      render_display();
     }
   }
 
@@ -260,16 +347,20 @@ void loop() {
       }
     } else {
       // WiFi is up
-      if (mqtt_suspended && !mqtt.connected()) {
-        // Attempt to restore MQTT when previously suspended
-        mqtt_connect();
-        if (mqtt.connected()) {
-          mqtt_suspended = false;
-          Serial.println("MQTT resumed (WiFi restored)");
+      if (!mqtt.connected()) {
+        if ((int32_t)(millis() - mqtt_cooldown_until) >= 0) {
+          mqtt_connect();
+          if (mqtt.connected()) {
+            mqtt_suspended = false;
+            mqtt_cooldown_until = 0;
+            Serial.println("MQTT connected/resumed");
+          } else {
+            mqtt_cooldown_until = millis() + MQTT_BACKOFF_MS;
+            Serial.printf("MQTT connect failed; backing off %lus\n", (unsigned long)(MQTT_BACKOFF_MS/1000));
+          }
+        } else {
+          // In cooldown; skip connect attempt
         }
-      } else if (!mqtt.connected()) {
-        // Normal reconnect path if not suspended but MQTT dropped
-        mqtt_connect();
       }
     }
   }
@@ -294,7 +385,7 @@ void loop() {
     snprintf(buf, sizeof(buf), "%02u/%02u/%02u", rt.Day(), rt.Month(), yy);
     pad16(buf);
     strncpy(ui_line_date, buf, sizeof(ui_line_date));
-    render_display();
+    if (ui_page == 1) render_display();
   }
   // MQTT publish every 5s aligned (only if not suspended)
   if (!mqtt_suspended && mqtt.connected() && (int32_t)(now - next_mqtt) >= 0) {
