@@ -33,17 +33,28 @@ static const char* MQTT_PASS = ""; // e.g. "s3cret"
 static const uint32_t MQTT_BACKOFF_MS = 30000; // backoff after failed connect
 static WiFiClient wifiClient;
 static PubSubClient mqtt(wifiClient);
+// UI lines
+static char ui_line_dht[17] = "DHT Init......";
+static char ui_line_dhtErr[17] = "DHT Init......";
+static char ui_line_time[17] = "RTC Init.....";
+static char ui_line_date[17] = "RTC Init.....";
+static char ui_line_mpu[17] = "MPU Init......";
+static char ui_line_netw[17] = "MQTT Init.....";
+
 // When WiFi is unavailable, suspend MQTT loop/publish attempts to avoid blocking retries
 static bool mqtt_suspended = false;
 static uint32_t mqtt_cooldown_until = 0;
 
-// Event/state
+// Event/state variables
+// DHT11
 static bool dht_ok = false;
-static bool dht_failure = true;
 static uint32_t dht_err_count = 0;
 static uint32_t dht_fail_consec = 0;
 static bool dht_have_last = false;
+static uint32_t dht_last_ok_ms = 0;
 static float dht_last_tC = NAN, dht_last_h = NAN;
+static uint32_t dht_recovery_attempts = 0;
+// MPU6050
 static float last_gx = 0, last_gy = 0, last_gz = 0;
 static uint32_t mpu_change_until = 0; // keep LED blue until this time if change detected
 // Aligned scheduling timestamps
@@ -52,21 +63,9 @@ static uint32_t next_rtc = 0;
 static uint32_t next_mpu = 0;
 static uint32_t next_mqtt = 0;
 static uint32_t next_connect_check = 0;
-static uint32_t next_motion_page_refresh = 0; // throttles LCD refresh while on Motion page
 // LCD pages
-static uint8_t ui_page = 0; // 0: DHT, 1: Time, 2: Motion, 3: Network
+static uint8_t ui_page = 0; // 0: Temp&Humid, 1: Time&Date, 2: Motion, 3: Network
 static const uint8_t ui_pages = 4;
-static char ui_line_dht[17] = "                ";
-static char ui_line_time[17] = "                ";
-static char ui_line_date[17] = "                ";
-// DHT scheduling enhancements
-static uint32_t next_dht_quick = 0;        // quick retry schedule after a failure
-static uint32_t dht_warmup_until = 0;      // time until we start counting errors
-static uint32_t dht_last_ok_ms = 0;        // millis of last successful reading
-// Extended recovery state machine (opportunistic lightweight reads after a failure)
-static uint32_t dht_recovery_until = 0;    // while now < this, perform recovery reads
-static uint32_t next_dht_recovery = 0;     // next scheduled recovery attempt
-static uint8_t dht_recovery_attempts = 0;  // attempts in current recovery window
 
 // Inline LED helper (3-pin RGB, active HIGH per pins.hpp)
 static void LedBegin(){
@@ -91,12 +90,10 @@ static void pad16(char* s){ size_t l=strlen(s); while(l<16){ s[l++]=' '; } s[16]
 static void render_display(){
   char l0[17]; char l1[17];
   if (ui_page == 0) {
-    // DHT page
     strncpy(l0, ui_line_dht, 17);
     snprintf(l1, sizeof(l1), "DHT %s FC:%lu", dht_ok?"OK":"ERR", (unsigned long)dht_fail_consec);
     pad16(l1);
   } else if (ui_page == 1) {
-    // Time page: time on upper line, date on lower line
     strncpy(l0, ui_line_time, 17);
     strncpy(l1, ui_line_date, 17);
   } else if (ui_page == 2) {
@@ -170,7 +167,6 @@ void setup() {
   dht.begin();
   Serial.printf("DHT initialized on pin %d\n", Pins::DHT);
   Rtc.Begin();
-  dht_warmup_until = millis() + 10000; // 10s warm-up ignore error counts
 
   // Set RTC to compile time once per firmware upload using NVS build signature
   {
@@ -204,7 +200,6 @@ void setup() {
   mqtt.setKeepAlive(30);
 
   i2c_scan_once();
-  LedSetIdle();
   // Button
   pinMode(Pins::BTN, INPUT_PULLUP);
 }
@@ -227,90 +222,41 @@ void loop() {
     
     dht_ok = ok;
     if (!ok) {
-      if (millis() >= dht_warmup_until) {
-        dht_err_count++;
-        dht_fail_consec++;
-      }
-      // schedule a quick retry in 600ms if none pending
-      if (next_dht_quick == 0) next_dht_quick = millis() + 600;
-      // start recovery window (3s) for opportunistic fast single reads
-      if (dht_recovery_until < millis()) {
-        dht_recovery_until = millis() + 3000;
-        next_dht_recovery = millis() + 400; // first recovery attempt
-        dht_recovery_attempts = 0;
-      }
+      dht_err_count++;
+      dht_fail_consec++;
     } else {
-      dht_err_count = 0;
       dht_fail_consec = 0;
-      dht_failure = false;
       dht_last_tC = t; dht_last_h = h; dht_have_last = true;
-      dht_last_ok_ms = millis();
-      next_dht_quick = 0; // cancel quick retry if any
-      dht_recovery_until = 0; next_dht_recovery = 0; dht_recovery_attempts = 0;
     }
     // Prepare DHT UI line
     if (ok) {
       snprintf(ui_line_dht, sizeof(ui_line_dht), "T:%dC H:%d%%", (int)roundf(t), (int)roundf(h));
-    } else if (dht_have_last && dht_fail_consec < 3) {
+    } else if (dht_have_last) {
       snprintf(ui_line_dht, sizeof(ui_line_dht), "T:%dC H:%d%%", (int)roundf(dht_last_tC), (int)roundf(dht_last_h));
     } else {
-      // Show error or stale indicator
-      uint32_t age = dht_last_ok_ms ? (millis() - dht_last_ok_ms) : 0;
-      if (dht_have_last && age > 30000) {
-        snprintf(ui_line_dht, sizeof(ui_line_dht), "STALE %lu", (unsigned long)(age/1000));
-      } else {
-        snprintf(ui_line_dht, sizeof(ui_line_dht), "DHT ERR %lu", (unsigned long)dht_err_count);
-      }
+        snprintf(ui_line_dhtErr, sizeof(ui_line_dhtErr), "DHT ERR %lu", (unsigned long)dht_err_count);
     }
     pad16(ui_line_dht);
     if (ui_page == 0) render_display();
   }
 
-  // Quick retry logic (non-aligned, opportunistic) executes only if scheduled and after warm-up
-  if (next_dht_quick != 0 && (int32_t)(now - next_dht_quick) >= 0) {
-    // perform a lightweight single attempt without blocking other tasks
-    next_dht_quick = 0; // clear schedule first to avoid reentrancy
-    float h = dht.readHumidity();
-    float t = dht.readTemperature();
-    bool ok = !isnan(h) && !isnan(t);
-    if (ok) {
-      dht_ok = true;
-      dht_last_tC = t; dht_last_h = h; dht_have_last = true; dht_last_ok_ms = millis();
-      dht_err_count = 0; dht_fail_consec = 0; dht_failure = false;
-      snprintf(ui_line_dht, sizeof(ui_line_dht), "T:%dC H:%d%%", (int)roundf(t), (int)roundf(h));
-      pad16(ui_line_dht);
-      if (ui_page == 0) render_display();
-    } else {
-      // schedule another quick retry only if we haven't exceeded a short burst (max 2 quick retries between main intervals)
-      static uint8_t quick_retry_count = 0;
-      if (quick_retry_count < 2) {
-        next_dht_quick = millis() + 700;
-        quick_retry_count++;
-      } else {
-        quick_retry_count = 0; // reset for next main interval
-      }
-    }
-  }
-
   // Recovery state machine: sparse single reads for a short window after a failure
-  if (dht_recovery_until && millis() < dht_recovery_until && next_dht_recovery && (int32_t)(now - next_dht_recovery) >= 0) {
-    next_dht_recovery = 0; // clear before attempt
+  if (dht_ok) {
     float h = dht.readHumidity();
     float t = dht.readTemperature();
     bool ok = !isnan(h) && !isnan(t);
     if (ok) {
       dht_ok = true; dht_last_tC = t; dht_last_h = h; dht_have_last = true; dht_last_ok_ms = millis();
-      dht_err_count = 0; dht_fail_consec = 0; dht_failure = false;
+      dht_err_count = 0; dht_fail_consec = 0;
       snprintf(ui_line_dht, sizeof(ui_line_dht), "T:%dC H:%d%%", (int)roundf(t), (int)roundf(h)); pad16(ui_line_dht);
       if (ui_page == 0) render_display();
-      dht_recovery_until = 0; dht_recovery_attempts = 0; // end recovery
+
     } else {
       dht_recovery_attempts++;
       if (dht_recovery_attempts < 5) {
         next_dht_recovery = millis() + 450; // schedule another quick attempt
       } else {
-        // stop recovery; wait for next aligned interval
-        dht_recovery_until = 0; dht_recovery_attempts = 0;
+        dht_recovery_attempts = 0;
       }
     }
   }
@@ -369,7 +315,6 @@ void loop() {
     }
   }
 
-  // RTC date+time to LCD line 1 once per second (HH:MM:SSDD/MM/YY fits 16 chars)
   if ((int32_t)(now - next_rtc) >= 0) {
     if (next_rtc == 0) next_rtc = now; do { next_rtc += 1000; } while ((int32_t)(now - next_rtc) >= 0);
     // Validate RTC running
@@ -386,7 +331,7 @@ void loop() {
     pad16(buf);
     strncpy(ui_line_time, buf, sizeof(ui_line_time));
     // Date DD/MM/YY
-    snprintf(buf, sizeof(buf), "%02u/%02u/%02u", rt.Day(), rt.Month(), yy);
+    snprintf(buf, sizeof(buf), "%02u/%02u/%04u", rt.Day(), rt.Month(), rt.Year());
     pad16(buf);
     strncpy(ui_line_date, buf, sizeof(ui_line_date));
     if (ui_page == 1) render_display();
@@ -406,7 +351,7 @@ void loop() {
     Serial.printf("MQTT publish: %s\n", payload);
   }
 
-  // Service MQTT loop (non-blocking) only if active
+  // Service MQTT loop only if active
   if (!mqtt_suspended && mqtt.connected()) {
     mqtt.loop();
   }
@@ -419,11 +364,10 @@ void loop() {
   if (showRed) {
     LedRed();
   } else if ((int32_t)(now - mpu_change_until) < 0) {
-    LedForceBlue();
+    LedBlue();
   } else {
-    LedForceGreen();
+    LedGreen();
   }
-  LedUpdate();
 
   // Button handling (debounced, on press cycle pages)
   static bool btn_last = true; // pull-up idle HIGH
