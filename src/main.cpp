@@ -67,7 +67,6 @@ static uint32_t dht_last_ok_ms = 0;        // millis of last successful reading
 static uint32_t dht_recovery_until = 0;    // while now < this, perform recovery reads
 static uint32_t next_dht_recovery = 0;     // next scheduled recovery attempt
 static uint8_t dht_recovery_attempts = 0;  // attempts in current recovery window
-static bool dht_bypassed = false;          // hardware bypass mode active
 
 // Inline LED helper (3-pin RGB, active HIGH per pins.hpp)
 static void LedBegin(){
@@ -83,11 +82,9 @@ static void LedSet(bool r,bool g,bool b){
   digitalWrite(Pins::LED_G, g?HIGH:LOW);
   digitalWrite(Pins::LED_B, b?HIGH:LOW);
 }
-static void LedSetIdle(){ LedSet(false,true,false); }
-static void LedForceRed(){ LedSet(true,false,false); }
-static void LedForceBlue(){ LedSet(false,false,true); }
-static void LedForceGreen(){ LedSetIdle(); }
-static void LedUpdate(){}
+static void LedRed(){ LedSet(true,false,false); }
+static void LedBlue(){ LedSet(false,false,true); }
+static void LedGreen(){ LedSet(false,true,false); }
 
 static void pad16(char* s){ size_t l=strlen(s); while(l<16){ s[l++]=' '; } s[16]='\0'; }
 
@@ -122,27 +119,11 @@ static void render_display(){
 
 static bool dht_read_retry(float &tC, float &hPct, int attempts=3, uint32_t gapMs=60) {
   for (int i=0;i<attempts;++i) {
-    Serial.printf("DHT attempt %d: ", i+1);
-    
-    // Manual pin check
-    pinMode(Pins::DHT, INPUT_PULLUP);
-    int pinState = digitalRead(Pins::DHT);
-    Serial.printf("pin=%d ", pinState);
-    
     float h = dht.readHumidity();
     float t = dht.readTemperature();
-    Serial.printf("h=%.1f t=%.1f ", h, t);
-    
-    // Also try Fahrenheit to check if sensor responds differently
-    float tf = dht.readTemperature(true);
-    Serial.printf("tf=%.1f ", tf);
-    
     if (!isnan(h) && !isnan(t)) {
-      tC = t; hPct = h; 
-      Serial.println("OK");
-      return true;
+      tC = t; hPct = h; return true;
     }
-    Serial.println("FAIL");
     if (i+1 < attempts) delay(gapMs);
   }
   return false;
@@ -186,26 +167,8 @@ void setup() {
   lcd.setCursor(0,0); lcd.print("CycleComputer  ");
   lcd.setCursor(0,1); lcd.print("Init...         ");
 
-  // DHT hardware test and bypass mode
-  Serial.println("*** DHT 3-pin module test ***");
-  pinMode(Pins::DHT, INPUT_PULLUP);
-  delay(100);
-  int pinTest = digitalRead(Pins::DHT);
-  Serial.printf("DHT pin %d state: %d\n", Pins::DHT, pinTest);
-  
-  if (pinTest == 0) {
-    Serial.println("*** DHT HARDWARE ISSUE DETECTED ***");
-    Serial.println("Pin stuck LOW - check wiring or try 3.3V power");
-    Serial.println("Bypassing DHT, using mock data...");
-    dht_bypassed = true;
-    dht_have_last = true;
-    dht_last_tC = 22.5; // mock temperature
-    dht_last_h = 45.0;  // mock humidity
-  } else {
-    dht.begin();
-    Serial.printf("DHT initialized on pin %d\n", Pins::DHT);
-    dht_bypassed = false;
-  }
+  dht.begin();
+  Serial.printf("DHT initialized on pin %d\n", Pins::DHT);
   Rtc.Begin();
   dht_warmup_until = millis() + 10000; // 10s warm-up ignore error counts
 
@@ -259,18 +222,8 @@ void loop() {
     bool ok = false;
     float h = NAN, t = NAN;
     
-    if (dht_bypassed) {
-      // Mock data mode - vary slightly to show it's working
-      static int mockCounter = 0;
-      mockCounter++;
-      dht_last_tC = 22.0 + (mockCounter % 10) * 0.1; // 22.0-22.9
-      dht_last_h = 40.0 + (mockCounter % 20) * 0.5;  // 40.0-49.5
-      ok = true;
-      Serial.println("Using mock DHT data (hardware bypassed)");
-    } else {
-      ok = dht_read_retry(t, h, 2, 40); // normal reading
-      Serial.printf("DHT raw: h=%.1f t=%.1f ok=%s\n", h, t, ok?"true":"false");
-    }
+    ok = dht_read_retry(t, h, 2, 40);
+    Serial.printf("DHT raw: h=%.1f t=%.1f ok=%s\n", h, t, ok?"true":"false");
     
     dht_ok = ok;
     if (!ok) {
@@ -290,10 +243,7 @@ void loop() {
       dht_err_count = 0;
       dht_fail_consec = 0;
       dht_failure = false;
-      if (!ok) { // only update from real reading, not mock
-        dht_last_tC = t; dht_last_h = h;
-      }
-      dht_have_last = true;
+      dht_last_tC = t; dht_last_h = h; dht_have_last = true;
       dht_last_ok_ms = millis();
       next_dht_quick = 0; // cancel quick retry if any
       dht_recovery_until = 0; next_dht_recovery = 0; dht_recovery_attempts = 0;
@@ -317,7 +267,7 @@ void loop() {
   }
 
   // Quick retry logic (non-aligned, opportunistic) executes only if scheduled and after warm-up
-  if (!dht_bypassed && next_dht_quick != 0 && (int32_t)(now - next_dht_quick) >= 0) {
+  if (next_dht_quick != 0 && (int32_t)(now - next_dht_quick) >= 0) {
     // perform a lightweight single attempt without blocking other tasks
     next_dht_quick = 0; // clear schedule first to avoid reentrancy
     float h = dht.readHumidity();
@@ -343,7 +293,7 @@ void loop() {
   }
 
   // Recovery state machine: sparse single reads for a short window after a failure
-  if (!dht_bypassed && dht_recovery_until && millis() < dht_recovery_until && next_dht_recovery && (int32_t)(now - next_dht_recovery) >= 0) {
+  if (dht_recovery_until && millis() < dht_recovery_until && next_dht_recovery && (int32_t)(now - next_dht_recovery) >= 0) {
     next_dht_recovery = 0; // clear before attempt
     float h = dht.readHumidity();
     float t = dht.readTemperature();
@@ -462,12 +412,12 @@ void loop() {
   }
 
   // LED policy:
-  // - Red if any failure (DHT read fail this cycle) or dht_err_count > 100
-  // - Else Blue while MPU changes (until mpu_change_until)
+  // - Red if failure
+  // - Blue while MPU changes detected
   // - Else Green (idle)
   bool showRed = dht_failure || (dht_err_count > 100);
   if (showRed) {
-    LedForceRed();
+    LedRed();
   } else if ((int32_t)(now - mpu_change_until) < 0) {
     LedForceBlue();
   } else {
