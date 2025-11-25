@@ -57,7 +57,23 @@ void setup() {
   lcd.setCursor(0,0); lcd.print("CycleComputer  ");
   lcd.setCursor(0,1); lcd.print("System Init... ");
 
+  // DHT sensor initialization
+  Serial.printf("Initializing DHT11 on pin %d\n", Pins::DHT);
+  
+  // Ensure pin is properly configured
+  pinMode(Pins::DHT, INPUT_PULLUP);
+  delay(100);
+  
   dht.begin();
+  delay(2000); // DHT11 needs time to stabilize after power-on
+  Serial.println("DHT11 initialization complete");
+  
+  // Test immediate reading
+  float test_h = dht.readHumidity();
+  float test_t = dht.readTemperature();
+  Serial.printf("Initial DHT test: t=%.1f, h=%.1f (nan check: t=%d, h=%d)\n", 
+                test_t, test_h, isnan(test_t), isnan(test_h));
+  
   Rtc.Begin();
 
   // Set RTC to compile time once per firmware upload using NVS build signature
@@ -71,6 +87,9 @@ void setup() {
     mpu.setFilterBandwidth(MPU6050_BAND_44_HZ);
   }
   Serial.printf("MPU6050 %s at 0x%02X\n", mpu_ok?"OK":"N/A", I2CAddr::MPU);
+  
+  // I2C device scan for debugging
+  Utils::i2c_scan();
 
   // WiFi + MQTT init
   // Start asynchronous WiFi attempt; skip MQTT connect here to prevent blocking before sensors start.
@@ -81,9 +100,6 @@ void setup() {
 
   // Button
   pinMode(Pins::BTN, INPUT_PULLUP);
-
-  // Initialize theft detection to true for testing
-  security_state.theft_detected = true;
 }
 
 void loop() {
@@ -100,39 +116,33 @@ void loop() {
     
     ok = Utils::dht_read_retry(dht, t, h, 2, 40);
     
+    // Debug DHT readings
+    Serial.printf("DHT read attempt: ok=%d, t=%.1f, h=%.1f\n", ok, t, h);
+    
     dht_state.ok = ok;
     if (!ok) {
       dht_state.err_count++;
       dht_state.err_consec++;
+      Serial.printf("DHT failed: consecutive=%lu, total=%lu\n", 
+                    (unsigned long)dht_state.err_consec, (unsigned long)dht_state.err_count);
     } else {
       dht_state.err_consec = 0;
       dht_state.last_tC = t; dht_state.last_h = h; dht_state.have_last = true;
     }
-    // Prepare DHT UI line
+    // Prepare DHT UI lines
     if (ok) {
       snprintf(ui_state.line_dht, sizeof(ui_state.line_dht), "T:%dC H:%d%%", (int)roundf(t), (int)roundf(h));
+      snprintf(ui_state.line_dhtErr, sizeof(ui_state.line_dhtErr), "DHT OK");
     } else if (dht_state.have_last) {
-      snprintf(ui_state.line_dht, sizeof(ui_state.line_dht), "T:%dC H:%d%%", (int)roundf(dht_state.last_tC), (int)roundf(dht_state.last_h));
+      snprintf(ui_state.line_dht, sizeof(ui_state.line_dht), "T:%dC H:%d%% (old)", (int)roundf(dht_state.last_tC), (int)roundf(dht_state.last_h));
+      snprintf(ui_state.line_dhtErr, sizeof(ui_state.line_dhtErr), "DHT ERR %lu", (unsigned long)dht_state.err_count);
     } else {
-        snprintf(ui_state.line_dhtErr, sizeof(ui_state.line_dhtErr), "DHT ERR %lu", (unsigned long)dht_state.err_count);
+      snprintf(ui_state.line_dht, sizeof(ui_state.line_dht), "DHT No Data");
+      snprintf(ui_state.line_dhtErr, sizeof(ui_state.line_dhtErr), "DHT ERR %lu", (unsigned long)dht_state.err_count);
     }
     Utils::pad16(ui_state.line_dht);
+    Utils::pad16(ui_state.line_dhtErr);
     if (ui_state.page == 0) Display::render(lcd, ui_state, net_state, mqtt);
-  }
-
-  if (dht_state.ok) {
-    float h = dht.readHumidity();
-    float t = dht.readTemperature();
-    bool ok = !isnan(h) && !isnan(t);
-    if (ok) {
-      dht_state.ok = true; dht_state.last_tC = t; dht_state.last_h = h; dht_state.have_last = true; dht_state.last_ok_ms = millis();
-      dht_state.err_count = 0; dht_state.err_consec = 0;
-      snprintf(ui_state.line_dht, sizeof(ui_state.line_dht), "T:%dC H:%d%%", (int)roundf(t), (int)roundf(h)); Utils::pad16(ui_state.line_dht);
-      if (ui_state.page == 0) Display::render(lcd, ui_state, net_state, mqtt);
-
-    } else {
-      dht_state.recovery_attempts++;
-    }
   }
 
   // MPU read every 100ms aligned
@@ -158,9 +168,9 @@ void loop() {
     }
     
     // Update MPU display lines (always update to show current values)
-    snprintf(ui_state.line_aXYZ, sizeof(ui_state.line_aXYZ), "A:%.2f,%.2f,%.2f", current_mpu.last_ax, current_mpu.last_ay, current_mpu.last_az);
+    snprintf(ui_state.line_aXYZ, sizeof(ui_state.line_aXYZ), "A:%.1f,%.1f,%.1f", current_mpu.last_ax, current_mpu.last_ay, current_mpu.last_az);
     Utils::pad16(ui_state.line_aXYZ);
-    snprintf(ui_state.line_gXYZ, sizeof(ui_state.line_gXYZ), "G:%.2f,%.2f,%.2f", current_mpu.last_gx, current_mpu.last_gy, current_mpu.last_gz);
+    snprintf(ui_state.line_gXYZ, sizeof(ui_state.line_gXYZ), "G:%.1f,%.1f,%.1f", current_mpu.last_gx, current_mpu.last_gy, current_mpu.last_gz);
     Utils::pad16(ui_state.line_gXYZ);
     
     // Refresh motion page either on detected motion change or every 500ms while displayed

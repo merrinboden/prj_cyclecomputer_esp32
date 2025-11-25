@@ -129,15 +129,22 @@ namespace Utils {
 
   // DHT read with retry logic
   inline bool dht_read_retry(DHT& dht, float& tC, float& hPct, int attempts = 3, uint32_t gapMs = 60) {
+    Serial.printf("DHT retry: pin=%d, attempts=%d\n", Pins::DHT, attempts);
     for (int i = 0; i < attempts; ++i) {
       float h = dht.readHumidity();
       float t = dht.readTemperature();
+      Serial.printf("DHT attempt %d: h=%.1f, t=%.1f, h_nan=%d, t_nan=%d\n", 
+                    i+1, h, t, isnan(h), isnan(t));
       if (!isnan(h) && !isnan(t)) {
         tC = t;
         hPct = h;
+        Serial.printf("DHT SUCCESS: T=%.1fC, H=%.1f%%\n", t, h);
         return true;
       }
-      if (i + 1 < attempts) delay(gapMs);
+      if (i + 1 < attempts) {
+        Serial.printf("DHT retry %d failed, waiting %lums\n", i+1, (unsigned long)gapMs);
+        delay(gapMs);
+      }
     }
     return false;
   }
