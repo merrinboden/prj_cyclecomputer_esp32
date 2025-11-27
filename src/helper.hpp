@@ -1,8 +1,10 @@
 #pragma once
 
 #include <Arduino.h>
-#include <WiFi.h>
-#include <PubSubClient.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 #include <LiquidCrystal_I2C.h>
 #include <DHT.h>
 #include <Adafruit_MPU6050.h>
@@ -12,23 +14,20 @@
 
 // ===== CONFIGURATION CONSTANTS =====
 namespace Config {
-  // WiFi / MQTT configuration
-  constexpr const char* WIFI_SSID = "Merrin's Pixel 8";
-  constexpr const char* WIFI_PASS = "12345678";
-  constexpr const char* MQTT_HOST = "10.220.204.1";
-  constexpr uint16_t MQTT_PORT = 1883;
-  constexpr const char* MQTT_CLIENT_ID = "cyclecomputer";
-  constexpr const char* MQTT_TOPIC = "cyclecomputer/telemetry";
-  constexpr const char* MQTT_USER = ""; // Optional: set non-empty to use broker auth
-  constexpr const char* MQTT_PASS = ""; // Optional: set non-empty to use broker auth
-  constexpr uint32_t MQTT_BACKOFF_MS = 30000; // backoff after failed connect
+  // BLE / CoAP configuration
+  constexpr const char* BLE_DEVICE_NAME = "CycleComputer";
+  constexpr const char* BLE_SERVICE_UUID = "12345678-1234-5678-9abc-def012345678";
+  constexpr const char* BLE_CHARACTERISTIC_UUID = "87654321-4321-8765-cba9-fedcba987654";
+  constexpr const char* COAP_RESOURCE_PATH = "/telemetry";
+  constexpr uint32_t BLE_ADVERTISING_INTERVAL = 1000; // ms between advertisements
+  constexpr uint32_t COAP_BACKOFF_MS = 10000; // backoff after failed transmission
   
   // Timing constants
   constexpr uint32_t DHT_INTERVAL_MS = 2500;
   constexpr uint32_t RTC_INTERVAL_MS = 1000;
   constexpr uint32_t MPU_INTERVAL_MS = 100;
-  constexpr uint32_t MQTT_INTERVAL_MS = 5000;
-  constexpr uint32_t CONNECTIVITY_CHECK_MS = 5000;
+  constexpr uint32_t COAP_INTERVAL_MS = 5000;
+  constexpr uint32_t BLE_CHECK_MS = 5000;
   
   // Motion detection thresholds
   constexpr float ACCEL_THRESHOLD = 0.03f;
@@ -79,8 +78,8 @@ struct TimingState {
   uint32_t next_dht = 0;
   uint32_t next_rtc = 0;
   uint32_t next_mpu = 0;
-  uint32_t next_mqtt = 0;
-  uint32_t next_connect_check = 0;
+  uint32_t next_coap = 0;
+  uint32_t next_ble_check = 0;
 };
 
 struct UIState {
@@ -90,14 +89,17 @@ struct UIState {
   char line_date[Config::UI_LINE_LENGTH] = "RTC Init.....";
   char line_aXYZ[Config::UI_LINE_LENGTH] = "MPU Init......";
   char line_gXYZ[Config::UI_LINE_LENGTH] = "MPU Init......";
-  char line_ip[Config::UI_LINE_LENGTH] = "WiFi Init.....";
-  char line_netw[Config::UI_LINE_LENGTH] = "MQTT Init.....";
+  char line_ble[Config::UI_LINE_LENGTH] = "BLE Init......";
+  char line_coap[Config::UI_LINE_LENGTH] = "CoAP Init.....";
   uint8_t page = 0;
 };
 
-struct NetworkState {
-  bool mqtt_suspended = false;
-  uint32_t mqtt_cooldown_until = 0;
+struct BLEState {
+  bool connected = false;
+  bool advertising = false;
+  uint32_t last_transmission = 0;
+  uint32_t transmission_count = 0;
+  uint32_t connection_count = 0;
 };
 
 struct SecurityState {
@@ -201,29 +203,78 @@ namespace LED {
   }
 }
 
-// ===== WIFI & MQTT HELPERS =====
-namespace Network {
-  // Non-blocking WiFi connect attempt
-  inline void wifi_connect() {
-    if (WiFi.status() == WL_CONNECTED) return;
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(Config::WIFI_SSID, Config::WIFI_PASS);
-  }
-
-  // Non-blocking MQTT connect attempt
-  inline void mqtt_connect(PubSubClient& mqtt) {
-    if (mqtt.connected()) return;
-    if (Config::MQTT_USER && *Config::MQTT_USER) {
-      mqtt.connect(Config::MQTT_CLIENT_ID, Config::MQTT_USER, Config::MQTT_PASS);
-    } else {
-      mqtt.connect(Config::MQTT_CLIENT_ID);
+// ===== BLE & COAP HELPERS =====
+namespace BLECoAP {
+  static BLEServer* pServer = nullptr;
+  static BLECharacteristic* pCharacteristic = nullptr;
+  static bool deviceConnected = false;
+  
+  class ServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+      Serial.println("BLE client connected");
+    };
+    
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+      Serial.println("BLE client disconnected");
+      pServer->startAdvertising(); // restart advertising
     }
+  };
+  
+  // Initialize BLE server
+  inline void init() {
+    BLEDevice::init(Config::BLE_DEVICE_NAME);
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new ServerCallbacks());
+    
+    BLEService *pService = pServer->createService(Config::BLE_SERVICE_UUID);
+    
+    pCharacteristic = pService->createCharacteristic(
+                        Config::BLE_CHARACTERISTIC_UUID,
+                        BLECharacteristic::PROPERTY_READ |
+                        BLECharacteristic::PROPERTY_WRITE |
+                        BLECharacteristic::PROPERTY_NOTIFY
+                      );
+    
+    pCharacteristic->addDescriptor(new BLE2902());
+    pService->start();
+    
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(Config::BLE_SERVICE_UUID);
+    pAdvertising->setScanResponse(false);
+    pAdvertising->setMinPreferred(0x0);
+    BLEDevice::startAdvertising();
+    
+    Serial.println("BLE server initialized and advertising started");
+  }
+  
+  // Send CoAP-like data over BLE
+  inline bool sendData(const char* payload) {
+    if (!deviceConnected || !pCharacteristic) {
+      return false;
+    }
+    
+    // Simple CoAP-like message format: "POST /telemetry {data}"
+    char coapMsg[256];
+    snprintf(coapMsg, sizeof(coapMsg), "POST %s %s", Config::COAP_RESOURCE_PATH, payload);
+    
+    pCharacteristic->setValue(coapMsg);
+    pCharacteristic->notify();
+    
+    Serial.printf("CoAP over BLE sent: %s\n", coapMsg);
+    return true;
+  }
+  
+  // Check connection status
+  inline bool isConnected() {
+    return deviceConnected;
   }
 }
 
 // ===== DISPLAY MANAGEMENT =====
 namespace Display {
-  inline void render(LiquidCrystal_I2C& lcd, const UIState& ui_state, const NetworkState& net_state, PubSubClient& mqtt) {
+  inline void render(LiquidCrystal_I2C& lcd, const UIState& ui_state, const BLEState& ble_state) {
     char l0[Config::UI_LINE_LENGTH];
     char l1[Config::UI_LINE_LENGTH];
     
@@ -240,9 +291,9 @@ namespace Display {
       strncpy(l0, ui_state.line_aXYZ, Config::UI_LINE_LENGTH);
       strncpy(l1, ui_state.line_gXYZ, Config::UI_LINE_LENGTH);
     } else {
-      // Network page
-      strncpy(l0, ui_state.line_ip, Config::UI_LINE_LENGTH);
-      strncpy(l1, ui_state.line_netw, Config::UI_LINE_LENGTH);
+      // BLE/CoAP page
+      strncpy(l0, ui_state.line_ble, Config::UI_LINE_LENGTH);
+      strncpy(l1, ui_state.line_coap, Config::UI_LINE_LENGTH);
     }
     
     lcd.setCursor(0, 0);

@@ -6,8 +6,8 @@
 #include <DHT.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
-#include <WiFi.h>
-#include <PubSubClient.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
 #include <ThreeWire.h>
 #include <RtcDS1302.h>
 #include "pins.hpp"
@@ -21,17 +21,13 @@ static bool mpu_ok = false;
 static ThreeWire ds1302Bus(Pins::DS1302_DAT, Pins::DS1302_CLK, Pins::DS1302_RST);
 static RtcDS1302<ThreeWire> Rtc(ds1302Bus);
 
-// Hardware instances
-static WiFiClient wifiClient;
-static PubSubClient mqtt(wifiClient);
-
 // Application state
 static DHTState dht_state;
 static MPUState mpu_state;
 static SOSState sos_state;
 static TimingState timing;
 static UIState ui_state;
-static NetworkState net_state;
+static BLEState ble_state;
 static SecurityState security_state;
 
 // Helper function for initial RTC setup
@@ -71,8 +67,7 @@ void setup() {
   // Test immediate reading
   float test_h = dht.readHumidity();
   float test_t = dht.readTemperature();
-  Serial.printf("Initial DHT test: t=%.1f, h=%.1f (nan check: t=%d, h=%d)\n", 
-                test_t, test_h, isnan(test_t), isnan(test_h));
+  Serial.printf("Initial DHT test: t=%.1f, h=%.1f (nan check: t=%d, h=%d)\n", test_t, test_h, isnan(test_t), isnan(test_h));
   
   Rtc.Begin();
 
@@ -91,12 +86,11 @@ void setup() {
   // I2C device scan for debugging
   Utils::i2c_scan();
 
-  // WiFi + MQTT init
-  // Start asynchronous WiFi attempt; skip MQTT connect here to prevent blocking before sensors start.
-  Network::wifi_connect();
-  mqtt.setServer(Config::MQTT_HOST, Config::MQTT_PORT);
-  mqtt.setSocketTimeout(1);   // seconds; keep connect() from blocking long
-  mqtt.setKeepAlive(30);
+  // BLE + CoAP init
+  Serial.println("Initializing BLE server...");
+  BLECoAP::init();
+  ble_state.advertising = true;
+  Serial.println("BLE server initialized and advertising");
 
   // Button
   pinMode(Pins::BTN, INPUT_PULLUP);
@@ -123,12 +117,12 @@ void loop() {
     if (!ok) {
       dht_state.err_count++;
       dht_state.err_consec++;
-      Serial.printf("DHT failed: consecutive=%lu, total=%lu\n", 
-                    (unsigned long)dht_state.err_consec, (unsigned long)dht_state.err_count);
+      Serial.printf("DHT failed: consecutive=%lu, total=%lu\n", (unsigned long)dht_state.err_consec, (unsigned long)dht_state.err_count);
     } else {
       dht_state.err_consec = 0;
       dht_state.last_tC = t; dht_state.last_h = h; dht_state.have_last = true;
     }
+
     // Prepare DHT UI lines
     if (ok) {
       snprintf(ui_state.line_dht, sizeof(ui_state.line_dht), "T:%dC H:%d%%", (int)roundf(t), (int)roundf(h));
@@ -142,7 +136,7 @@ void loop() {
     }
     Utils::pad16(ui_state.line_dht);
     Utils::pad16(ui_state.line_dhtErr);
-    if (ui_state.page == 0) Display::render(lcd, ui_state, net_state, mqtt);
+    if (ui_state.page == 0) Display::render(lcd, ui_state, ble_state);
   }
 
   // MPU read every 100ms aligned
@@ -162,66 +156,41 @@ void loop() {
     if (Utils::detect_motion(current_mpu, mpu_state)) {
       mpu_event = true;
       mpu_state = current_mpu;
-      Serial.printf("MPU motion: a=(%.1f,%.1f,%.1f)g g=(%.1f,%.1f,%.1f)deg/s\n", 
-                    current_mpu.last_ax, current_mpu.last_ay, current_mpu.last_az, 
+      Serial.printf("MPU motion: a=(%.1f,%.1f,%.1f)g g=(%.1f,%.1f,%.1f)deg/s\n",
+                    current_mpu.last_ax, current_mpu.last_ay, current_mpu.last_az,
                     current_mpu.last_gx, current_mpu.last_gy, current_mpu.last_gz);
     }
     
-    // Update MPU display lines (always update to show current values)
+    // Update MPU display lines
     snprintf(ui_state.line_aXYZ, sizeof(ui_state.line_aXYZ), "A:%.1f,%.1f,%.1f", current_mpu.last_ax, current_mpu.last_ay, current_mpu.last_az);
     Utils::pad16(ui_state.line_aXYZ);
     snprintf(ui_state.line_gXYZ, sizeof(ui_state.line_gXYZ), "G:%.1f,%.1f,%.1f", current_mpu.last_gx, current_mpu.last_gy, current_mpu.last_gz);
     Utils::pad16(ui_state.line_gXYZ);
-    
-    // Refresh motion page either on detected motion change or every 500ms while displayed
+
     if (ui_state.page == 2 && (mpu_event)) {
-      Display::render(lcd, ui_state, net_state, mqtt);
+      Display::render(lcd, ui_state, ble_state);
     }
   }
 
-  // Connectivity check
-  if ((int32_t)(now - timing.next_connect_check) >= 0) {
-    if (timing.next_connect_check == 0) timing.next_connect_check = now; do { timing.next_connect_check += Config::CONNECTIVITY_CHECK_MS; } while ((int32_t)(now - timing.next_connect_check) >= 0);
-    // WiFi handling
-    if (WiFi.status() != WL_CONNECTED) {
-      Network::wifi_connect();
-      if (WiFi.status() != WL_CONNECTED) {
-        // Still down; suspend MQTT if not already
-        if (!net_state.mqtt_suspended) {
-          net_state.mqtt_suspended = true;
-          Serial.println("MQTT suspended (WiFi down)");
-        }
-      }
-    } else {
-      // WiFi is up
-      if (!mqtt.connected()) {
-        if ((int32_t)(millis() - net_state.mqtt_cooldown_until) >= 0) {
-          Network::mqtt_connect(mqtt);
-          if (mqtt.connected()) {
-            net_state.mqtt_suspended = false;
-            net_state.mqtt_cooldown_until = 0;
-            Serial.println("MQTT connected/resumed");
-          } else {
-            net_state.mqtt_cooldown_until = millis() + Config::MQTT_BACKOFF_MS;
-            Serial.printf("MQTT connect failed; backing off %lus\n", (unsigned long)(Config::MQTT_BACKOFF_MS/1000));
-          }
-        }
-      }
-    }
+  // BLE status check
+  if ((int32_t)(now - timing.next_ble_check) >= 0) {
+    if (timing.next_ble_check == 0) timing.next_ble_check = now; do { timing.next_ble_check += Config::BLE_CHECK_MS; } while ((int32_t)(now - timing.next_ble_check) >= 0);
     
-    // Update network page UI lines
-    IPAddress ip = WiFi.localIP();
-    snprintf(ui_state.line_ip, sizeof(ui_state.line_ip), "IP:%s", 
-             (WiFi.status() == WL_CONNECTED) ? ip.toString().c_str() : "0.0.0.0");
-    Utils::pad16(ui_state.line_ip);
+    // Update BLE connection status
+    ble_state.connected = BLECoAP::isConnected();
     
-    const char* mq = (!net_state.mqtt_suspended && mqtt.connected()) ? "MQTT:OK" : 
-                     (net_state.mqtt_suspended ? "MQTT:SUSP" : "MQTT:DOWN");
-    strncpy(ui_state.line_netw, mq, sizeof(ui_state.line_netw));
-    Utils::pad16(ui_state.line_netw);
+    // Update BLE/CoAP page UI lines
+    const char* ble_status = ble_state.connected ? "BLE:Connected" : 
+                           (ble_state.advertising ? "BLE:Advertising" : "BLE:Stopped");
+    strncpy(ui_state.line_ble, ble_status, sizeof(ui_state.line_ble));
+    Utils::pad16(ui_state.line_ble);
     
-    // Refresh network page if displayed
-    if (ui_state.page == 3) Display::render(lcd, ui_state, net_state, mqtt);
+    snprintf(ui_state.line_coap, sizeof(ui_state.line_coap), "CoAP TX:%lu", 
+             (unsigned long)ble_state.transmission_count);
+    Utils::pad16(ui_state.line_coap);
+    
+    // Refresh BLE page if displayed
+    if (ui_state.page == 3) Display::render(lcd, ui_state, ble_state);
   }
 
   if ((int32_t)(now - timing.next_rtc) >= 0) {
@@ -240,40 +209,45 @@ void loop() {
     snprintf(buf, sizeof(buf), "%02u/%02u/%04u", rt.Day(), rt.Month(), rt.Year());
     Utils::pad16(buf);
     strncpy(ui_state.line_date, buf, sizeof(ui_state.line_date));
-    if (ui_state.page == 1) Display::render(lcd, ui_state, net_state, mqtt);
+    if (ui_state.page == 1) Display::render(lcd, ui_state, ble_state);
   }
 
-  // MQTT publish every 5s aligned (only if not suspended)
-  if (!net_state.mqtt_suspended && mqtt.connected() && (int32_t)(now - timing.next_mqtt) >= 0) {
-    if (timing.next_mqtt == 0) timing.next_mqtt = now; do { timing.next_mqtt += Config::MQTT_INTERVAL_MS; } while ((int32_t)(now - timing.next_mqtt) >= 0);
-    char payload[160];
+  // CoAP over BLE transmission every 5s aligned
+  if ((int32_t)(now - timing.next_coap) >= 0) {
+    if (timing.next_coap == 0) timing.next_coap = now; do { timing.next_coap += Config::COAP_INTERVAL_MS; } while ((int32_t)(now - timing.next_coap) >= 0);
+    
+    char payload[200];
     int tempOut = dht_state.have_last ? (int)roundf(dht_state.last_tC) : -99;
     int humOut = dht_state.have_last ? (int)roundf(dht_state.last_h) : -1;
+    
     snprintf(payload, sizeof(payload),
-             "{\"tempC\":%d,\"hum%%\":%d,\"dht_fail_consec\":%lu,\"ip\":\"%s\"}",
+             "{\"tempC\":%d,\"humidity\":%d,\"dht_errors\":%lu,\"accel\":[%.2f,%.2f,%.2f],\"gyro\":[%.2f,%.2f,%.2f],\"uptime\":%lu}",
              tempOut, humOut, (unsigned long)dht_state.err_consec,
-             WiFi.status()==WL_CONNECTED ? WiFi.localIP().toString().c_str() : "0.0.0.0");
-    mqtt.publish(Config::MQTT_TOPIC, payload);
-    Serial.printf("MQTT publish: %s\n", payload);
-  }
-
-  // Service MQTT loop only if active
-  if (!net_state.mqtt_suspended && mqtt.connected()) {
-    mqtt.loop();
+             mpu_state.last_ax, mpu_state.last_ay, mpu_state.last_az,
+             mpu_state.last_gx, mpu_state.last_gy, mpu_state.last_gz,
+             (unsigned long)(millis() / 1000));
+    
+    if (BLECoAP::sendData(payload)) {
+      ble_state.transmission_count++;
+      ble_state.last_transmission = now;
+      Serial.printf("CoAP transmission #%lu successful\n", (unsigned long)ble_state.transmission_count);
+    } else {
+      Serial.println("CoAP transmission failed - no BLE connection");
+    }
   }
 
   // LED policy:
-  // - Red if connectivity failure (suspended or theft -> SOS blinking)
-  // - Blue while connecting
-  // - Else Green (idle/OK)
+  // - Red if theft detected (SOS blinking)
+  // - Blue while advertising (no connection)
+  // - Green when BLE connected
   if (security_state.theft_detected) {
     LED::handle_sos(sos_state, now);
-  } else if (net_state.mqtt_suspended) {
-    LED::red();
-  } else if (net_state.mqtt_cooldown_until != 0 || WiFi.status() != WL_CONNECTED) {
+  } else if (!ble_state.connected && ble_state.advertising) {
     LED::blue();
-  } else {
+  } else if (ble_state.connected) {
     LED::green();
+  } else {
+    LED::red(); // BLE not working
   }
 
   // Button handling 
@@ -281,7 +255,7 @@ void loop() {
   bool btn = digitalRead(Pins::BTN);
   if (btn == LOW && btn_armed) { // pressed
     ui_state.page = (ui_state.page + 1) % Config::UI_PAGES; // wrap-around via modulo
-    Display::render(lcd, ui_state, net_state, mqtt);
+    Display::render(lcd, ui_state, ble_state);
     btn_armed = false; // wait for release before next advance
   } else if (btn == HIGH) {
     btn_armed = true; // re-arm on release
