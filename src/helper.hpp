@@ -1,10 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
 #include <LiquidCrystal_I2C.h>
 #include <DHT.h>
 #include <Adafruit_MPU6050.h>
@@ -12,15 +10,70 @@
 #include <ThreeWire.h>
 #include "pins.hpp"
 
+// ===== CoAP PROTOCOL DEFINITIONS =====
+namespace CoAP {
+  // CoAP Message Types
+  enum MessageType : uint8_t {
+    CON = 0,  // Confirmable
+    NON = 1,  // Non-confirmable  
+    ACK = 2,  // Acknowledgment
+    RST = 3   // Reset
+  };
+  
+  // CoAP Method Codes
+  enum MethodCode : uint8_t {
+    GET = 1,
+    POST = 2,
+    PUT = 3,
+    DELETE = 4
+  };
+  
+  // CoAP Response Codes
+  enum ResponseCode : uint8_t {
+    CREATED = 65,      // 2.01
+    DELETED = 66,      // 2.02
+    VALID = 67,        // 2.03
+    CHANGED = 68,      // 2.04
+    CONTENT = 69,      // 2.05
+    BAD_REQUEST = 128, // 4.00
+    UNAUTHORIZED = 129, // 4.01
+    NOT_FOUND = 132,   // 4.04
+    METHOD_NOT_ALLOWED = 133, // 4.05
+    INTERNAL_ERROR = 160 // 5.00
+  };
+  
+  // CoAP Option Numbers
+  enum OptionNumber : uint8_t {
+    URI_PATH = 11,
+    CONTENT_FORMAT = 12,
+    MAX_AGE = 14,
+    URI_QUERY = 15,
+    OBSERVE = 6
+  };
+  
+  // Content Formats
+  enum ContentFormat : uint16_t {
+    TEXT_PLAIN = 0,
+    APPLICATION_JSON = 50,
+    APPLICATION_CBOR = 60
+  };
+}
+
 // ===== CONFIGURATION CONSTANTS =====
 namespace Config {
-  // BLE / CoAP configuration
-  constexpr const char* BLE_DEVICE_NAME = "CycleComputer";
-  constexpr const char* BLE_SERVICE_UUID = "12345678-1234-5678-9abc-def012345678";
-  constexpr const char* BLE_CHARACTERISTIC_UUID = "87654321-4321-8765-cba9-fedcba987654";
-  constexpr const char* COAP_RESOURCE_PATH = "/telemetry";
-  constexpr uint32_t BLE_ADVERTISING_INTERVAL = 1000; // ms between advertisements
+  // WiFi configuration
+  constexpr const char* WIFI_SSID = "YourWiFiSSID";
+  constexpr const char* WIFI_PASSWORD = "YourWiFiPassword";
+  constexpr uint32_t WIFI_TIMEOUT_MS = 10000;
+  
+  // CoAP configuration
+  constexpr const char* COAP_SERVER_IP = "192.168.1.100"; // CoAP server IP
+  constexpr uint16_t COAP_SERVER_PORT = 5683; // Standard CoAP port
+  constexpr const char* COAP_RESOURCE_PATH = "telemetry";
+  constexpr uint32_t COAP_TRANSMISSION_INTERVAL = 5000; // ms between transmissions
   constexpr uint32_t COAP_BACKOFF_MS = 10000; // backoff after failed transmission
+  constexpr uint8_t COAP_VERSION = 1;
+  constexpr uint16_t COAP_MAX_MESSAGE_SIZE = 256;
   
   // Timing constants
   constexpr uint32_t DHT_INTERVAL_MS = 2500;
@@ -38,17 +91,58 @@ namespace Config {
   constexpr size_t UI_LINE_LENGTH = 17;
 }
 
-// ===== SOS PATTERN =====
-namespace SOSPattern {
-  constexpr uint16_t pattern[] = {
-    // S: dot dot dot
-    200, 200, 200, 200, 200, 600, // ... with gaps
-    // O: dash dash dash  
-    600, 200, 600, 200, 600, 600, // --- with gaps
-    // S: dot dot dot
-    200, 200, 200, 200, 200, 1400 // ... with long pause before repeat
+// ===== LED SYSTEM =====
+namespace LEDSystem {
+  enum Status : uint8_t {
+    OFF = 0,
+    STARTUP,
+    WIFI_CONNECTING,
+    WIFI_CONNECTED,
+    COAP_TRANSMITTING,
+    ERROR_DHT,
+    ERROR_WIFI,
+    SECURITY_ALERT,
+    MOTION_DETECTED,
+    SYSTEM_OK
   };
-  constexpr uint8_t PATTERN_LENGTH = 18;
+  
+  enum Color : uint8_t {
+    BLACK = 0,
+    RED = 1,
+    GREEN = 2,
+    BLUE = 4,
+    YELLOW = RED | GREEN,
+    CYAN = GREEN | BLUE,
+    MAGENTA = RED | BLUE,
+    WHITE = RED | GREEN | BLUE
+  };
+  
+  enum Pattern : uint8_t {
+    SOLID,
+    BLINK_SLOW,
+    BLINK_FAST,
+    PULSE,
+    SOS,
+    HEARTBEAT
+  };
+  
+  // Pattern timing definitions (in milliseconds)
+  constexpr uint16_t BLINK_SLOW_ON = 1000;
+  constexpr uint16_t BLINK_SLOW_OFF = 1000;
+  constexpr uint16_t BLINK_FAST_ON = 200;
+  constexpr uint16_t BLINK_FAST_OFF = 200;
+  constexpr uint16_t PULSE_PERIOD = 2000;
+  constexpr uint16_t HEARTBEAT_ON = 100;
+  constexpr uint16_t HEARTBEAT_OFF = 100;
+  constexpr uint16_t HEARTBEAT_PAUSE = 800;
+  
+  // SOS pattern: S(...)O(---)S(...)
+  constexpr uint16_t SOS_PATTERN[] = {
+    150, 150, 150, 150, 150, 300,  // S: dot dot dot
+    450, 150, 450, 150, 450, 300,  // O: dash dash dash
+    150, 150, 150, 150, 150, 1200  // S: dot dot dot + pause
+  };
+  constexpr uint8_t SOS_PATTERN_LENGTH = 18;
 }
 
 // ===== STATE STRUCTURES =====
@@ -68,10 +162,14 @@ struct MPUState {
   float last_gx = 0, last_gy = 0, last_gz = 0;
 };
 
-struct SOSState {
+struct LEDState {
+  LEDSystem::Status current_status = LEDSystem::STARTUP;
+  LEDSystem::Color current_color = LEDSystem::BLACK;
+  LEDSystem::Pattern current_pattern = LEDSystem::SOLID;
   uint32_t next_change = 0;
-  uint8_t state = 0;
+  uint8_t pattern_step = 0;
   bool led_on = false;
+  uint32_t pattern_start_time = 0;
 };
 
 struct TimingState {
@@ -94,12 +192,28 @@ struct UIState {
   uint8_t page = 0;
 };
 
-struct BLEState {
-  bool connected = false;
-  bool advertising = false;
+struct CoAPMessage {
+  uint8_t version : 2;
+  uint8_t type : 2;
+  uint8_t token_length : 4;
+  uint8_t code;
+  uint16_t message_id;
+  uint8_t token[8];
+  uint8_t* options;
+  uint16_t options_length;
+  uint8_t* payload;
+  uint16_t payload_length;
+};
+
+struct WiFiCoAPState {
+  bool wifi_connected = false;
+  bool coap_server_available = false;
   uint32_t last_transmission = 0;
   uint32_t transmission_count = 0;
-  uint32_t connection_count = 0;
+  uint32_t connection_attempts = 0;
+  uint16_t next_message_id = 1;
+  uint32_t next_token = 0x12345678;
+  IPAddress server_ip;
 };
 
 struct SecurityState {
@@ -168,113 +282,369 @@ namespace LED {
     pinMode(Pins::LED_R, OUTPUT);
     pinMode(Pins::LED_G, OUTPUT);
     pinMode(Pins::LED_B, OUTPUT);
-    digitalWrite(Pins::LED_R, LOW);
-    digitalWrite(Pins::LED_G, LOW);
-    digitalWrite(Pins::LED_B, LOW);
+    setColor(LEDSystem::BLACK);
   }
 
-  inline void set(bool r, bool g, bool b) {
-    digitalWrite(Pins::LED_R, r ? HIGH : LOW);
-    digitalWrite(Pins::LED_G, g ? HIGH : LOW);
-    digitalWrite(Pins::LED_B, b ? HIGH : LOW);
+  inline void setColor(LEDSystem::Color color) {
+    digitalWrite(Pins::LED_R, (color & LEDSystem::RED) ? HIGH : LOW);
+    digitalWrite(Pins::LED_G, (color & LEDSystem::GREEN) ? HIGH : LOW);
+    digitalWrite(Pins::LED_B, (color & LEDSystem::BLUE) ? HIGH : LOW);
   }
-
-  inline void red() { set(true, false, false); }
-  inline void blue() { set(false, false, true); }
-  inline void green() { set(false, true, false); }
-  inline void off() { set(false, false, false); }
-
-  // SOS blinking handler
-  inline void handle_sos(SOSState& sos_state, uint32_t now) {
-    if ((int32_t)(now - sos_state.next_change) >= 0) {
-      if (sos_state.state >= SOSPattern::PATTERN_LENGTH) {
-        sos_state.state = 0; // reset pattern
-      }
-      sos_state.led_on = !sos_state.led_on; // toggle LED state
-      sos_state.next_change = now + SOSPattern::pattern[sos_state.state];
-      sos_state.state++;
+  
+  inline void off() { setColor(LEDSystem::BLACK); }
+  
+  // Determine appropriate status based on system state
+  inline LEDSystem::Status determineStatus(const DHTState& dht_state, 
+                                          const WiFiCoAPState& coap_state,
+                                          const SecurityState& security_state,
+                                          bool motion_detected = false) {
+    // Priority order: Security -> Connectivity -> Sensors -> Normal operation
+    if (security_state.theft_detected) {
+      return LEDSystem::SECURITY_ALERT;
     }
     
-    if (sos_state.led_on) {
-      red();
-    } else {
-      off();
+    if (motion_detected) {
+      return LEDSystem::MOTION_DETECTED;
+    }
+    
+    if (!coap_state.wifi_connected) {
+      return LEDSystem::WIFI_CONNECTING;
+    }
+    
+    if (dht_state.err_consec > 10) {
+      return LEDSystem::ERROR_DHT;
+    }
+    
+    if (coap_state.wifi_connected) {
+      return LEDSystem::WIFI_CONNECTED;
+    }
+    
+    return LEDSystem::SYSTEM_OK;
+  }
+  
+  // Set LED status with appropriate color and pattern
+  inline void setStatus(LEDState& led_state, LEDSystem::Status status, uint32_t now) {
+    if (led_state.current_status != status) {
+      led_state.current_status = status;
+      led_state.pattern_step = 0;
+      led_state.next_change = now;
+      led_state.pattern_start_time = now;
+      led_state.led_on = false;
+      
+      // Configure color and pattern based on status
+      switch (status) {
+        case LEDSystem::OFF:
+          led_state.current_color = LEDSystem::BLACK;
+          led_state.current_pattern = LEDSystem::SOLID;
+          break;
+        case LEDSystem::STARTUP:
+          led_state.current_color = LEDSystem::YELLOW;
+          led_state.current_pattern = LEDSystem::BLINK_SLOW;
+          break;
+        case LEDSystem::WIFI_CONNECTING:
+          led_state.current_color = LEDSystem::BLUE;
+          led_state.current_pattern = LEDSystem::BLINK_FAST;
+          break;
+        case LEDSystem::WIFI_CONNECTED:
+          led_state.current_color = LEDSystem::GREEN;
+          led_state.current_pattern = LEDSystem::SOLID;
+          break;
+        case LEDSystem::COAP_TRANSMITTING:
+          led_state.current_color = LEDSystem::CYAN;
+          led_state.current_pattern = LEDSystem::PULSE;
+          break;
+        case LEDSystem::ERROR_DHT:
+          led_state.current_color = LEDSystem::YELLOW;
+          led_state.current_pattern = LEDSystem::BLINK_FAST;
+          break;
+        case LEDSystem::ERROR_WIFI:
+          led_state.current_color = LEDSystem::RED;
+          led_state.current_pattern = LEDSystem::BLINK_SLOW;
+          break;
+        case LEDSystem::SECURITY_ALERT:
+          led_state.current_color = LEDSystem::RED;
+          led_state.current_pattern = LEDSystem::SOS;
+          break;
+        case LEDSystem::MOTION_DETECTED:
+          led_state.current_color = LEDSystem::BLUE;
+          led_state.current_pattern = LEDSystem::PULSE;
+          break;
+        case LEDSystem::SYSTEM_OK:
+          led_state.current_color = LEDSystem::GREEN;
+          led_state.current_pattern = LEDSystem::HEARTBEAT;
+          break;
+      }
+    }
+  }
+  
+  // Update LED based on current pattern
+  inline void update(LEDState& led_state, uint32_t now) {
+    if ((int32_t)(now - led_state.next_change) < 0) {
+      return; // Not time to change yet
+    }
+    
+    switch (led_state.current_pattern) {
+      case LEDSystem::SOLID:
+        setColor(led_state.current_color);
+        led_state.next_change = now + 1000; // Check again in 1 second
+        break;
+        
+      case LEDSystem::BLINK_SLOW:
+        led_state.led_on = !led_state.led_on;
+        setColor(led_state.led_on ? led_state.current_color : LEDSystem::BLACK);
+        led_state.next_change = now + (led_state.led_on ? LEDSystem::BLINK_SLOW_ON : LEDSystem::BLINK_SLOW_OFF);
+        break;
+        
+      case LEDSystem::BLINK_FAST:
+        led_state.led_on = !led_state.led_on;
+        setColor(led_state.led_on ? led_state.current_color : LEDSystem::BLACK);
+        led_state.next_change = now + (led_state.led_on ? LEDSystem::BLINK_FAST_ON : LEDSystem::BLINK_FAST_OFF);
+        break;
+        
+      case LEDSystem::PULSE:
+        // Simple pulse: fade in and out over 2 seconds
+        uint32_t pulse_time = (now - led_state.pattern_start_time) % LEDSystem::PULSE_PERIOD;
+        if (pulse_time < LEDSystem::PULSE_PERIOD / 2) {
+          setColor(led_state.current_color);
+        } else {
+          setColor(LEDSystem::BLACK);
+        }
+        led_state.next_change = now + 50; // Update every 50ms for smooth pulse
+        break;
+        
+      case LEDSystem::SOS:
+        if (led_state.pattern_step >= LEDSystem::SOS_PATTERN_LENGTH) {
+          led_state.pattern_step = 0;
+        }
+        led_state.led_on = !led_state.led_on;
+        setColor(led_state.led_on ? led_state.current_color : LEDSystem::BLACK);
+        led_state.next_change = now + LEDSystem::SOS_PATTERN[led_state.pattern_step];
+        led_state.pattern_step++;
+        break;
+        
+      case LEDSystem::HEARTBEAT:
+        // Double beat pattern: on-off-on-pause
+        switch (led_state.pattern_step % 4) {
+          case 0: // First beat on
+            setColor(led_state.current_color);
+            led_state.next_change = now + LEDSystem::HEARTBEAT_ON;
+            break;
+          case 1: // First beat off
+            setColor(LEDSystem::BLACK);
+            led_state.next_change = now + LEDSystem::HEARTBEAT_OFF;
+            break;
+          case 2: // Second beat on
+            setColor(led_state.current_color);
+            led_state.next_change = now + LEDSystem::HEARTBEAT_ON;
+            break;
+          case 3: // Long pause
+            setColor(LEDSystem::BLACK);
+            led_state.next_change = now + LEDSystem::HEARTBEAT_PAUSE;
+            break;
+        }
+        led_state.pattern_step++;
+        break;
     }
   }
 }
 
-// ===== BLE & COAP HELPERS =====
-namespace BLECoAP {
-  static BLEServer* pServer = nullptr;
-  static BLECharacteristic* pCharacteristic = nullptr;
-  static bool deviceConnected = false;
+// ===== WIFI & COAP HELPERS =====
+namespace WiFiCoAP {
+  static WiFiUDP udp;
+  static WiFiCoAPState* coap_state_ptr = nullptr;
   
-  class ServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-      deviceConnected = true;
-      Serial.println("BLE client connected");
-    };
+  // CoAP option encoding helper
+  inline uint16_t encodeOption(uint8_t* buffer, uint16_t delta, uint16_t length, const uint8_t* value) {
+    uint16_t pos = 0;
     
-    void onDisconnect(BLEServer* pServer) {
-      deviceConnected = false;
-      Serial.println("BLE client disconnected");
-      pServer->startAdvertising(); // restart advertising
+    // Encode option delta and length
+    uint8_t header = 0;
+    if (delta < 13) {
+      header |= (delta << 4);
+    } else {
+      header |= (13 << 4);
     }
-  };
-  
-  // Initialize BLE server
-  inline void init() {
-    BLEDevice::init(Config::BLE_DEVICE_NAME);
-    pServer = BLEDevice::createServer();
-    pServer->setCallbacks(new ServerCallbacks());
     
-    BLEService *pService = pServer->createService(Config::BLE_SERVICE_UUID);
+    if (length < 13) {
+      header |= length;
+    } else {
+      header |= 13;
+    }
     
-    pCharacteristic = pService->createCharacteristic(
-                        Config::BLE_CHARACTERISTIC_UUID,
-                        BLECharacteristic::PROPERTY_READ |
-                        BLECharacteristic::PROPERTY_WRITE |
-                        BLECharacteristic::PROPERTY_NOTIFY
-                      );
+    buffer[pos++] = header;
     
-    pCharacteristic->addDescriptor(new BLE2902());
-    pService->start();
+    // Extended delta
+    if (delta >= 13) {
+      buffer[pos++] = delta - 13;
+    }
     
-    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-    pAdvertising->addServiceUUID(Config::BLE_SERVICE_UUID);
-    pAdvertising->setScanResponse(false);
-    pAdvertising->setMinPreferred(0x0);
-    BLEDevice::startAdvertising();
+    // Extended length  
+    if (length >= 13) {
+      buffer[pos++] = length - 13;
+    }
     
-    Serial.println("BLE server initialized and advertising started");
+    // Option value
+    if (length > 0 && value) {
+      memcpy(&buffer[pos], value, length);
+      pos += length;
+    }
+    
+    return pos;
   }
   
-  // Send CoAP-like data over BLE
-  inline bool sendData(const char* payload) {
-    if (!deviceConnected || !pCharacteristic) {
+  // Encode CoAP message to binary format
+  inline uint16_t encodeMessage(uint8_t* buffer, const CoAPMessage& msg) {
+    uint16_t pos = 0;
+    
+    // Header (4 bytes)
+    buffer[pos++] = (msg.version << 6) | (msg.type << 4) | msg.token_length;
+    buffer[pos++] = msg.code;
+    buffer[pos++] = (msg.message_id >> 8) & 0xFF;
+    buffer[pos++] = msg.message_id & 0xFF;
+    
+    // Token
+    if (msg.token_length > 0) {
+      memcpy(&buffer[pos], msg.token, msg.token_length);
+      pos += msg.token_length;
+    }
+    
+    // Options (simplified - just URI-PATH and Content-Format)
+    uint16_t option_delta = 0;
+    
+    // URI-PATH option
+    uint16_t uri_len = strlen(Config::COAP_RESOURCE_PATH);
+    uint16_t delta = CoAP::URI_PATH - option_delta;
+    pos += encodeOption(&buffer[pos], delta, uri_len, (const uint8_t*)Config::COAP_RESOURCE_PATH);
+    option_delta = CoAP::URI_PATH;
+    
+    // Content-Format option (JSON)
+    uint8_t content_format[2] = {0, CoAP::APPLICATION_JSON};
+    delta = CoAP::CONTENT_FORMAT - option_delta;
+    pos += encodeOption(&buffer[pos], delta, 2, content_format);
+    
+    // Payload marker
+    if (msg.payload_length > 0) {
+      buffer[pos++] = 0xFF;
+      memcpy(&buffer[pos], msg.payload, msg.payload_length);
+      pos += msg.payload_length;
+    }
+    
+    return pos;
+  }
+  
+  // Initialize WiFi connection
+  inline bool initWiFi() {
+    WiFi.begin(Config::WIFI_SSID, Config::WIFI_PASSWORD);
+    
+    Serial.print("Connecting to WiFi");
+    uint32_t start_time = millis();
+    
+    while (WiFi.status() != WL_CONNECTED && (millis() - start_time) < Config::WIFI_TIMEOUT_MS) {
+      delay(500);
+      Serial.print(".");
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println();
+      Serial.printf("WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
+      return true;
+    } else {
+      Serial.println("\nWiFi connection failed!");
+      return false;
+    }
+  }
+  
+  // Initialize CoAP over WiFi
+  inline bool init(WiFiCoAPState& coap_state) {
+    coap_state_ptr = &coap_state;
+    
+    // Initialize WiFi
+    if (!initWiFi()) {
       return false;
     }
     
-    // Simple CoAP-like message format: "POST /telemetry {data}"
-    char coapMsg[256];
-    snprintf(coapMsg, sizeof(coapMsg), "POST %s %s", Config::COAP_RESOURCE_PATH, payload);
+    coap_state.wifi_connected = true;
     
-    pCharacteristic->setValue(coapMsg);
-    pCharacteristic->notify();
+    // Parse server IP
+    coap_state.server_ip.fromString(Config::COAP_SERVER_IP);
     
-    Serial.printf("CoAP over BLE sent: %s\n", coapMsg);
+    // Initialize UDP
+    udp.begin(0); // Use random local port
+    
+    Serial.printf("CoAP client initialized. Server: %s:%d\n", 
+                  Config::COAP_SERVER_IP, Config::COAP_SERVER_PORT);
+    
     return true;
   }
   
-  // Check connection status
+  // Send CoAP message over WiFi UDP
+  inline bool sendCoAPMessage(WiFiCoAPState& coap_state, const char* payload) {
+    if (!coap_state.wifi_connected || WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi not connected");
+      return false;
+    }
+    
+    // Create CoAP message structure
+    CoAPMessage msg;
+    msg.version = Config::COAP_VERSION;
+    msg.type = CoAP::NON;  // Non-confirmable for simplicity
+    msg.code = CoAP::POST;
+    msg.message_id = coap_state.next_message_id++;
+    msg.token_length = 4;
+    
+    // Generate token
+    uint32_t token = coap_state.next_token++;
+    msg.token[0] = (token >> 24) & 0xFF;
+    msg.token[1] = (token >> 16) & 0xFF;
+    msg.token[2] = (token >> 8) & 0xFF;
+    msg.token[3] = token & 0xFF;
+    
+    msg.payload = (uint8_t*)payload;
+    msg.payload_length = strlen(payload);
+    
+    // Encode to binary format
+    uint8_t buffer[Config::COAP_MAX_MESSAGE_SIZE];
+    uint16_t message_length = encodeMessage(buffer, msg);
+    
+    // Send over UDP
+    udp.beginPacket(coap_state.server_ip, Config::COAP_SERVER_PORT);
+    udp.write(buffer, message_length);
+    bool success = udp.endPacket();
+    
+    if (success) {
+      Serial.printf("CoAP message sent: ID=%u, Token=0x%08X, Size=%u bytes\n", 
+                    msg.message_id, token, message_length);
+      Serial.printf("Payload: %s\n", payload);
+    } else {
+      Serial.println("Failed to send CoAP message");
+    }
+    
+    return success;
+  }
+  
+  // Check WiFi connection status
   inline bool isConnected() {
-    return deviceConnected;
+    return WiFi.status() == WL_CONNECTED;
+  }
+  
+  // Reconnect WiFi if needed
+  inline void maintain() {
+    if (WiFi.status() != WL_CONNECTED && coap_state_ptr) {
+      Serial.println("WiFi connection lost. Attempting reconnection...");
+      coap_state_ptr->wifi_connected = false;
+      coap_state_ptr->connection_attempts++;
+      
+      if (initWiFi()) {
+        coap_state_ptr->wifi_connected = true;
+        Serial.println("WiFi reconnected successfully");
+      }
+    }
   }
 }
 
 // ===== DISPLAY MANAGEMENT =====
 namespace Display {
-  inline void render(LiquidCrystal_I2C& lcd, const UIState& ui_state, const BLEState& ble_state) {
+  inline void render(LiquidCrystal_I2C& lcd, const UIState& ui_state, const WiFiCoAPState& coap_state) {
     char l0[Config::UI_LINE_LENGTH];
     char l1[Config::UI_LINE_LENGTH];
     

@@ -24,10 +24,10 @@ static RtcDS1302<ThreeWire> Rtc(ds1302Bus);
 // Application state
 static DHTState dht_state;
 static MPUState mpu_state;
-static SOSState sos_state;
+static LEDState led_state;
 static TimingState timing;
 static UIState ui_state;
-static BLEState ble_state;
+static WiFiCoAPState coap_state;
 static SecurityState security_state;
 
 // Helper function for initial RTC setup
@@ -86,11 +86,13 @@ void setup() {
   // I2C device scan for debugging
   Utils::i2c_scan();
 
-  // BLE + CoAP init
-  Serial.println("Initializing BLE server...");
-  BLECoAP::init();
-  ble_state.advertising = true;
-  Serial.println("BLE server initialized and advertising");
+  // WiFi + CoAP init
+  Serial.println("Initializing WiFi and CoAP client...");
+  if (!WiFiCoAP::init(coap_state)) {
+    Serial.println("Failed to initialize WiFi/CoAP. Continuing without network...");
+  } else {
+    Serial.println("WiFi and CoAP client initialized successfully");
+  }
 
   // Button
   pinMode(Pins::BTN, INPUT_PULLUP);
@@ -136,7 +138,7 @@ void loop() {
     }
     Utils::pad16(ui_state.line_dht);
     Utils::pad16(ui_state.line_dhtErr);
-    if (ui_state.page == 0) Display::render(lcd, ui_state, ble_state);
+    if (ui_state.page == 0) Display::render(lcd, ui_state, coap_state);
   }
 
   // MPU read every 100ms aligned
@@ -168,29 +170,31 @@ void loop() {
     Utils::pad16(ui_state.line_gXYZ);
 
     if (ui_state.page == 2 && (mpu_event)) {
-      Display::render(lcd, ui_state, ble_state);
+      Display::render(lcd, ui_state, coap_state);
     }
   }
 
-  // BLE status check
+  // WiFi status check
   if ((int32_t)(now - timing.next_ble_check) >= 0) {
     if (timing.next_ble_check == 0) timing.next_ble_check = now; do { timing.next_ble_check += Config::BLE_CHECK_MS; } while ((int32_t)(now - timing.next_ble_check) >= 0);
     
-    // Update BLE connection status
-    ble_state.connected = BLECoAP::isConnected();
+    // Maintain WiFi connection
+    WiFiCoAP::maintain();
     
-    // Update BLE/CoAP page UI lines
-    const char* ble_status = ble_state.connected ? "BLE:Connected" : 
-                           (ble_state.advertising ? "BLE:Advertising" : "BLE:Stopped");
-    strncpy(ui_state.line_ble, ble_status, sizeof(ui_state.line_ble));
+    // Update WiFi connection status
+    coap_state.wifi_connected = WiFiCoAP::isConnected();
+    
+    // Update WiFi/CoAP page UI lines
+    const char* wifi_status = coap_state.wifi_connected ? "WiFi:Connected" : "WiFi:Disconnected";
+    strncpy(ui_state.line_ble, wifi_status, sizeof(ui_state.line_ble));
     Utils::pad16(ui_state.line_ble);
     
     snprintf(ui_state.line_coap, sizeof(ui_state.line_coap), "CoAP TX:%lu", 
-             (unsigned long)ble_state.transmission_count);
+             (unsigned long)coap_state.transmission_count);
     Utils::pad16(ui_state.line_coap);
     
     // Refresh BLE page if displayed
-    if (ui_state.page == 3) Display::render(lcd, ui_state, ble_state);
+    if (ui_state.page == 3) Display::render(lcd, ui_state, coap_state);
   }
 
   if ((int32_t)(now - timing.next_rtc) >= 0) {
@@ -209,7 +213,7 @@ void loop() {
     snprintf(buf, sizeof(buf), "%02u/%02u/%04u", rt.Day(), rt.Month(), rt.Year());
     Utils::pad16(buf);
     strncpy(ui_state.line_date, buf, sizeof(ui_state.line_date));
-    if (ui_state.page == 1) Display::render(lcd, ui_state, ble_state);
+    if (ui_state.page == 1) Display::render(lcd, ui_state, coap_state);
   }
 
   // CoAP over BLE transmission every 5s aligned
@@ -227,35 +231,26 @@ void loop() {
              mpu_state.last_gx, mpu_state.last_gy, mpu_state.last_gz,
              (unsigned long)(millis() / 1000));
     
-    if (BLECoAP::sendData(payload)) {
-      ble_state.transmission_count++;
-      ble_state.last_transmission = now;
-      Serial.printf("CoAP transmission #%lu successful\n", (unsigned long)ble_state.transmission_count);
+    if (WiFiCoAP::sendCoAPMessage(coap_state, payload)) {
+      coap_state.transmission_count++;
+      coap_state.last_transmission = now;
+      Serial.printf("CoAP transmission #%lu successful\n", (unsigned long)coap_state.transmission_count);
     } else {
-      Serial.println("CoAP transmission failed - no BLE connection");
+      Serial.println("CoAP transmission failed - no WiFi connection");
     }
   }
 
-  // LED policy:
-  // - Red if theft detected (SOS blinking)
-  // - Blue while advertising (no connection)
-  // - Green when BLE connected
-  if (security_state.theft_detected) {
-    LED::handle_sos(sos_state, now);
-  } else if (!ble_state.connected && ble_state.advertising) {
-    LED::blue();
-  } else if (ble_state.connected) {
-    LED::green();
-  } else {
-    LED::red(); // BLE not working
-  }
+  // LED system: determine status and update display
+  LEDSystem::Status target_status = LED::determineStatus(dht_state, coap_state, security_state, mpu_event);
+  LED::setStatus(led_state, target_status, now);
+  LED::update(led_state, now);
 
   // Button handling 
   static bool btn_armed = true; // one-shot: require full release before next advance
   bool btn = digitalRead(Pins::BTN);
   if (btn == LOW && btn_armed) { // pressed
     ui_state.page = (ui_state.page + 1) % Config::UI_PAGES; // wrap-around via modulo
-    Display::render(lcd, ui_state, ble_state);
+    Display::render(lcd, ui_state, coap_state);
     btn_armed = false; // wait for release before next advance
   } else if (btn == HIGH) {
     btn_armed = true; // re-arm on release
