@@ -2,9 +2,11 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <LiquidCrystal_I2C.h>
 #include <DHT.h>
 #include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
 #include <RtcDS1302.h>
 #include <ThreeWire.h>
 #include <CoAP-simple.h>
@@ -12,6 +14,35 @@
 #include "pins.hpp"
 
 // ===== CONFIGURATION CONSTANTS =====
+namespace Pins {
+  // I2C
+  static const uint8_t SDA = 21;
+  static const uint8_t SCL = 22;
+
+  // DHT11
+  static const uint8_t DHT = 23;
+
+  // MPU6050
+  static const uint8_t MPU_INT = 19;
+
+  // RGB LED
+  static const uint8_t LED_R = 25;
+  static const uint8_t LED_G = 26;
+  static const uint8_t LED_B = 27;
+
+  // RTC DS1302
+  static const uint8_t DS1302_RST = 18;
+  static const uint8_t DS1302_DAT = 5; 
+  static const uint8_t DS1302_CLK = 4; 
+
+  // Button
+  static const uint8_t BTN = 32;
+}
+
+namespace I2CAddr {
+  static const uint8_t LCD = 0x27;
+  static const uint8_t MPU = 0x68; 
+}
 namespace Config {
   // WiFi configuration
   constexpr char WIFI_SSID[] = "Merrin's Pixel 8";
@@ -29,7 +60,10 @@ namespace Config {
   // Timing intervals (ms)
   constexpr uint32_t DHT_READ_MS = 2000;
   constexpr uint32_t COAP_SEND_MS = 5000;
-  constexpr uint32_t PAGE_CYCLE_MS = 10000;
+  
+  // Button settings
+  constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
+  constexpr uint8_t TOTAL_PAGES = 4;
   
   // System settings
   constexpr uint32_t BAUD_RATE = 115200;
@@ -45,7 +79,7 @@ namespace LEDSystem {
   };
   
   // SOS pattern timing (3 short, 3 long, 3 short)
-  constexpr uint16_t SOS_PATTERN[] = {150, 150, 150, 150, 150, 400, 450, 400, 450, 400, 450, 150, 150, 150, 150, 150, 1000};
+  constexpr uint16_t SOS_PATTERN[] = {200, 200, 200, 200, 200, 600, 600, 200, 600, 200, 600, 600, 200, 200, 200, 200, 200, 1400};
   constexpr uint8_t SOS_PATTERN_LENGTH = sizeof(SOS_PATTERN) / sizeof(SOS_PATTERN[0]);
 }
 
@@ -60,6 +94,7 @@ struct SensorData {
 };
 
 struct SystemState {
+  bool locked = false;
   bool wifi_connected = false;
   bool theft_detected = false;
   uint32_t coap_transmissions = 0;
@@ -69,14 +104,31 @@ struct SystemState {
   uint32_t led_change_time = 0;
   uint8_t sos_step = 0;
   bool led_on = false;
+  bool button_reset = true;
 };
+
+// ===== BUTTON CONTROL =====
+namespace Button {
+  inline void init() {
+    pinMode(Pins::BTN, INPUT_PULLUP);
+  }
+  
+  inline bool checkPageChange(SystemState& state) {
+    bool current_state = digitalRead(Pins::BTN);
+    if (current_state == LOW && state.button_reset) {
+        state.ui_page = (state.ui_page + 1) % Config::TOTAL_PAGES;
+        return false;
+    } else {
+        return true;
+    }
+  }
+}
 
 // ===== UTILITY FUNCTIONS =====
 namespace Utils {
   // Theft detection based on excessive motion
   inline bool isTheftDetected(const SensorData& sensors) {
-    return (fabsf(sensors.accel_x) > 2.0f || fabsf(sensors.accel_y) > 2.0f || fabsf(sensors.accel_z) > 2.0f ||
-            fabsf(sensors.gyro_x) > 250.0f || fabsf(sensors.gyro_y) > 250.0f || fabsf(sensors.gyro_z) > 250.0f);
+    return (fabsf(sensors.accel_x) > 1.5f || fabsf(sensors.accel_y) > 1.0f || fabsf(sensors.accel_z) > 1.0f || fabsf(sensors.gyro_x) > 10.0f || fabsf(sensors.gyro_y) > 10.0f || fabsf(sensors.gyro_z) > 10.0f);
   }
   
   // Format display string to 16 characters
@@ -110,7 +162,7 @@ namespace LED {
   
   inline void updateStatus(SystemState& state, const SensorData& sensors, uint32_t now) {
     // Determine LED status
-    if (Utils::isTheftDetected(sensors)) {
+    if (Utils::isTheftDetected(sensors) && state.locked) {
       state.theft_detected = true;
     }
     
@@ -118,8 +170,7 @@ namespace LED {
       state.led_status = LEDSystem::THEFT_ALERT;
     } else if (!state.wifi_connected) {
       state.led_status = LEDSystem::COAP_CONNECTING;
-    } else if (state.wifi_connected && state.coap_transmissions > 0 && 
-               (now - state.last_coap_transmission) > 30000) {
+    } else if (state.wifi_connected && state.coap_transmissions > 0 && (now - state.last_coap_transmission) > 30000) {
       state.led_status = LEDSystem::COAP_ERROR;
     } else {
       state.led_status = LEDSystem::SYSTEM_OK;
@@ -151,7 +202,8 @@ namespace LED {
 
 // ===== WIFI & COAP =====
 namespace Network {
-  static Coap coap;
+  static WiFiUDP udp;
+  static Coap coap(udp, 5683);
   static IPAddress server_ip;
   
   inline bool init(SystemState& state) {
@@ -206,7 +258,7 @@ namespace Network {
 
 // ===== DISPLAY =====
 namespace Display {
-  inline void showPage(LiquidCrystal_I2C& lcd, uint8_t page, const SensorData& sensors, const SystemState& state, const RtcDS1302<ThreeWire>& rtc) {
+  inline void showPage(LiquidCrystal_I2C& lcd, uint8_t page, const SensorData& sensors, const SystemState& state, RtcDS1302<ThreeWire>& rtc) {
     char line1[17], line2[17];
     
     switch (page) {

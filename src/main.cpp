@@ -3,6 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <DHT.h>
 #include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
 #include <ThreeWire.h>
 #include <RtcDS1302.h>
 #include <WiFi.h>
@@ -14,17 +15,16 @@
 DHT dht(Pins::DHT, DHT11);
 Adafruit_MPU6050  mpu;
 LiquidCrystal_I2C lcd(Config::LCD_ADDR, 16, 2);
-ThreeWire myWire(Pins::RTC_DAT, Pins::RTC_CLK, Pins::RTC_RST);
+ThreeWire myWire(Pins::DS1302_DAT, Pins::DS1302_CLK, Pins::DS1302_RST);
 RtcDS1302<ThreeWire> Rtc(myWire);
 
-// === SIMPLIFIED STATE ===
+// === STATE ===
 SensorData sensors;
 SystemState state;
 
 // === TIMING ===
 uint32_t next_sensor_read = 0;
 uint32_t next_coap_send = 0;
-uint32_t next_page_change = 0;
 
 void setup() {
   Serial.begin(Config::BAUD_RATE);
@@ -39,11 +39,11 @@ void setup() {
   lcd.print("Bike Computer");
   
   LED::init();
+  Button::init();
   
   // Sensor initialization
   dht.begin();
-  mpu.initialize();
-  sensors.mpu_ok = mpu.testConnection();
+  sensors.mpu_ok = mpu.begin();
   Serial.printf("MPU6050: %s\n", sensors.mpu_ok ? "OK" : "FAILED");
   
   Rtc.Begin();
@@ -76,14 +76,14 @@ void loop() {
     
     // MPU6050 sensor
     if (sensors.mpu_ok) {
-      int16_t ax, ay, az, gx, gy, gz;
-      mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-      sensors.accel_x = ax / 16384.0f;
-      sensors.accel_y = ay / 16384.0f;
-      sensors.accel_z = az / 16384.0f;
-      sensors.gyro_x = gx / 131.0f;
-      sensors.gyro_y = gy / 131.0f;
-      sensors.gyro_z = gz / 131.0f;
+      sensors_event_t a, g, temp;
+      mpu.getEvent(&a, &g, &temp);
+      sensors.accel_x = a.acceleration.x;
+      sensors.accel_y = a.acceleration.y;
+      sensors.accel_z = a.acceleration.z;
+      sensors.gyro_x = g.gyro.x;
+      sensors.gyro_y = g.gyro.y;
+      sensors.gyro_z = g.gyro.z;
     }
     
     next_sensor_read = now + Config::DHT_READ_MS;
@@ -100,11 +100,8 @@ void loop() {
   // === LED STATUS UPDATE ===
   LED::updateStatus(state, sensors, now);
   
-  // === DISPLAY UPDATE ===
-  if ((int32_t)(now - next_page_change) >= 0) {
-    state.ui_page = (state.ui_page + 1) % 4;
-    next_page_change = now + Config::PAGE_CYCLE_MS;
-  }
+  // === BUTTON & DISPLAY UPDATE ===
+  state.button_reset = Button::checkPageChange(state);
   Display::showPage(lcd, state.ui_page, sensors, state, Rtc);
   
   // === NETWORK MAINTENANCE ===
