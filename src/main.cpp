@@ -8,7 +8,6 @@
 #include <RtcDS1302.h>
 #include <WiFi.h>
 #include <CoAP-simple.h>
-#include "pins.hpp"
 #include "helper.hpp"
 
 // === GLOBAL OBJECTS ===

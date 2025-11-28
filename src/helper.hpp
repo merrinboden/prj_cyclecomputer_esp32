@@ -11,7 +11,6 @@
 #include <ThreeWire.h>
 #include <CoAP-simple.h>
 #include <cstdarg>
-#include "pins.hpp"
 
 // ===== CONFIGURATION CONSTANTS =====
 namespace Pins {
@@ -50,7 +49,7 @@ namespace Config {
   constexpr uint32_t WIFI_TIMEOUT_MS = 15000;
   
   // CoAP configuration
-  constexpr char COAP_SERVER_IP[] = "192.168.178.140";
+  constexpr char COAP_SERVER_IP[] = "10.192.116.238";
   constexpr uint16_t COAP_SERVER_PORT = 5683;
   constexpr char COAP_RESOURCE_PATH[] = "/data";
   
