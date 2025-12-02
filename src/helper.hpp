@@ -10,6 +10,7 @@
 #include <RtcDS1302.h>
 #include <ThreeWire.h>
 #include <CoAP-simple.h>
+#include <esp_sleep.h>
 #include <cstdarg>
 
 // ===== CONFIGURATION CONSTANTS =====
@@ -18,8 +19,8 @@ namespace Pins {
   static const uint8_t SDA = 21;
   static const uint8_t SCL = 22;
 
-  // DHT11
-  static const uint8_t DHT = 23;
+  // DHT
+  static const uint8_t DHT = 34;
 
   // MPU6050
   static const uint8_t MPU_INT = 19;
@@ -57,8 +58,17 @@ namespace Config {
   constexpr uint8_t LCD_ADDR = 0x27;
   
   // Timing intervals (ms)
-  constexpr uint32_t DHT_READ_MS = 2000;
-  constexpr uint32_t COAP_SEND_MS = 5000;
+  constexpr uint32_t DHT_READ_MS = 10000;  // Slower for power saving
+  constexpr uint32_t COAP_SEND_MOVING_MS = 500;  // 2 Hz during movement
+  constexpr uint32_t COAP_SEND_IDLE_MS = 1800000; // 30 min heartbeat
+  constexpr uint32_t ACCEL_SAMPLE_MS = 50;  // 20 Hz accelerometer sampling
+  
+  // Power management
+  constexpr uint32_t MOVEMENT_TIMEOUT_MS = 10000; // 10s no movement = idle
+  constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 600000; // 10 min retry when disconnected
+  constexpr uint32_t DEEP_SLEEP_THRESHOLD_MS = 1800000; // 30 min disconnected = deep sleep
+  constexpr float MOVEMENT_ACCEL_THRESHOLD = 0.1f; // m/s² for movement detection
+  constexpr float MOVEMENT_GYRO_THRESHOLD = 0.5f;  // rad/s for movement detection
   
   // Button settings
   constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
@@ -98,6 +108,14 @@ struct SystemState {
   bool theft_detected = false;
   uint32_t coap_transmissions = 0;
   uint32_t last_coap_transmission = 0;
+  
+  // Power management state
+  bool movement_detected = false;
+  uint32_t last_movement_time = 0;
+  uint32_t wifi_disconnect_time = 0;
+  uint32_t last_wifi_retry = 0;
+  bool is_moving = false;
+  float movement_magnitude = 0.0f;
   uint8_t ui_page = 0;
   LEDSystem::Status led_status = LEDSystem::COAP_CONNECTING;
   uint32_t led_change_time = 0;
@@ -106,6 +124,29 @@ struct SystemState {
   bool button_reset = true;
 };
 
+// ===== POWER MANAGEMENT =====
+namespace PowerMgmt {
+  inline void enableWiFiLightSleep() {
+    WiFi.setSleep(WIFI_PS_MIN_MODEM); // Light sleep mode
+  }
+  
+  inline void disableWiFiSleep() {
+    WiFi.setSleep(WIFI_PS_NONE);
+  }
+  
+  inline void enterDeepSleep(uint32_t sleep_time_ms) {
+    Serial.printf("Entering deep sleep for %lu ms\n", sleep_time_ms);
+    esp_sleep_enable_timer_wakeup(sleep_time_ms * 1000); // Convert to microseconds
+    esp_deep_sleep_start();
+  }
+  
+  inline bool shouldEnterDeepSleep(const SystemState& state, uint32_t now) {
+    return !state.wifi_connected && 
+           state.wifi_disconnect_time > 0 && 
+           (now - state.wifi_disconnect_time) > Config::DEEP_SLEEP_THRESHOLD_MS;
+  }
+}
+
 // ===== BUTTON CONTROL =====
 namespace Button {
   inline void init() {
@@ -113,21 +154,58 @@ namespace Button {
   }
   
   inline bool checkPageChange(SystemState& state) {
+    static bool last_button_state = HIGH;
+    static uint32_t last_button_change = 0;
+    uint32_t now = millis();
     bool current_state = digitalRead(Pins::BTN);
-    if (current_state == LOW && state.button_reset) {
+    
+    // Check for button press (HIGH to LOW transition with debounce)
+    if (last_button_state == HIGH && current_state == LOW) {
+      if ((now - last_button_change) > Config::BUTTON_DEBOUNCE_MS) {
         state.ui_page = (state.ui_page + 1) % Config::TOTAL_PAGES;
-        return false;
-    } else {
+        last_button_change = now;
+        last_button_state = current_state;
+        Serial.printf("Button pressed - Page changed to: %d\n", state.ui_page);
         return true;
+      }
+    } else if (last_button_state != current_state) {
+      last_button_change = now;
+      last_button_state = current_state;
     }
+    
+    return false;
   }
 }
 
 // ===== UTILITY FUNCTIONS =====
 namespace Utils {
+  // Movement detection based on accelerometer and gyroscope
+  inline bool detectMovement(const SensorData& sensors, SystemState& state, uint32_t now) {
+    // Calculate movement magnitude
+    float accel_mag = sqrtf(sensors.accel_x*sensors.accel_x + sensors.accel_y*sensors.accel_y + sensors.accel_z*sensors.accel_z);
+    float gyro_mag = sqrtf(sensors.gyro_x*sensors.gyro_x + sensors.gyro_y*sensors.gyro_y + sensors.gyro_z*sensors.gyro_z);
+    
+    state.movement_magnitude = accel_mag;
+    
+    bool movement = (accel_mag > (9.81f + Config::MOVEMENT_ACCEL_THRESHOLD) || 
+                    accel_mag < (9.81f - Config::MOVEMENT_ACCEL_THRESHOLD)) ||
+                   (gyro_mag > Config::MOVEMENT_GYRO_THRESHOLD);
+    
+    if (movement) {
+      state.last_movement_time = now;
+      state.movement_detected = true;
+    }
+    
+    // Check if we're currently in moving state
+    state.is_moving = (now - state.last_movement_time) < Config::MOVEMENT_TIMEOUT_MS;
+    
+    return movement;
+  }
+  
   // Theft detection based on excessive motion
   inline bool isTheftDetected(const SensorData& sensors) {
-    return (fabsf(sensors.accel_x) > 1.5f || fabsf(sensors.accel_y) > 1.0f || fabsf(sensors.accel_z) > 1.0f || fabsf(sensors.gyro_x) > 10.0f || fabsf(sensors.gyro_y) > 10.0f || fabsf(sensors.gyro_z) > 10.0f);
+    return (fabsf(sensors.accel_x) > 15.0f || fabsf(sensors.accel_y) > 15.0f || fabsf(sensors.accel_z) > 15.0f || 
+            fabsf(sensors.gyro_x) > 5.0f || fabsf(sensors.gyro_y) > 5.0f || fabsf(sensors.gyro_z) > 5.0f);
   }
   
   // Format display string to 16 characters
@@ -206,6 +284,8 @@ namespace Network {
   static IPAddress server_ip;
   
   inline bool init(SystemState& state) {
+    // Set WiFi power management
+    WiFi.mode(WIFI_STA);
     WiFi.begin(Config::WIFI_SSID, Config::WIFI_PASSWORD);
     
     Serial.print("Connecting to WiFi");
@@ -218,40 +298,102 @@ namespace Network {
     if (WiFi.status() == WL_CONNECTED) {
       Serial.printf("\nWiFi connected: %s\n", WiFi.localIP().toString().c_str());
       state.wifi_connected = true;
+      state.wifi_disconnect_time = 0;
       server_ip.fromString(Config::COAP_SERVER_IP);
       coap.start();
+      PowerMgmt::enableWiFiLightSleep(); // Enable power saving
       return true;
     }
     
     Serial.println("\nWiFi failed!");
+    state.wifi_disconnect_time = millis();
     return false;
   }
   
-  inline bool sendTelemetry(SystemState& state, const SensorData& sensors) {
+  inline bool sendTelemetry(SystemState& state, const SensorData& sensors, bool is_heartbeat = false) {
     if (!state.wifi_connected || WiFi.status() != WL_CONNECTED) return false;
     
-    char payload[150];
-    snprintf(payload, sizeof(payload),
-             "{\"temp\":%.1f,\"hum\":%.1f,\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f}",
-             sensors.temperature, sensors.humidity,
-             sensors.accel_x, sensors.accel_y, sensors.accel_z,
-             sensors.gyro_x, sensors.gyro_y, sensors.gyro_z);
+    // Validate server IP
+    if (server_ip == INADDR_NONE || server_ip == IPAddress(0,0,0,0)) {
+      Serial.println("Invalid server IP, skipping transmission");
+      return false;
+    }
     
-    int msgid = coap.send(server_ip, Config::COAP_SERVER_PORT, Config::COAP_RESOURCE_PATH, 
-                         COAP_CON, COAP_POST, NULL, 0, (uint8_t*)payload, strlen(payload));
+    // Temporarily disable WiFi sleep for transmission
+    PowerMgmt::disableWiFiSleep();
+    
+    // Create compact JSON payload
+    char payload[120];
+    if (is_heartbeat) {
+      snprintf(payload, sizeof(payload),
+               "{\"t\":%.1f,\"h\":%.1f,\"hb\":1,\"tx\":%lu}",
+               sensors.temperature, sensors.humidity, state.coap_transmissions);
+    } else {
+      snprintf(payload, sizeof(payload),
+               "{\"t\":%.1f,\"h\":%.1f,\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,\"mv\":%.2f}",
+               sensors.temperature, sensors.humidity,
+               sensors.accel_x, sensors.accel_y, sensors.accel_z, state.movement_magnitude);
+    }
+    
+    // Use CoAP NON (non-confirmable) for power efficiency
+    int msgid = 0;
+    try {
+      msgid = coap.send(server_ip, Config::COAP_SERVER_PORT, Config::COAP_RESOURCE_PATH, 
+                       COAP_NONCON, COAP_POST, NULL, 0, (uint8_t*)payload, strlen(payload));
+    } catch (...) {
+      Serial.println("CoAP send failed with exception");
+      PowerMgmt::enableWiFiLightSleep();
+      return false;
+    }
     
     if (msgid > 0) {
       state.coap_transmissions++;
       state.last_coap_transmission = millis();
-      Serial.printf("CoAP sent: %s\n", payload);
+      Serial.printf("CoAP %s: %s\n", is_heartbeat ? "heartbeat" : "data", payload);
+      
+      // Re-enable WiFi sleep after transmission
+      delay(25); // Allow transmission to complete (20ms + margin)
+      PowerMgmt::enableWiFiLightSleep();
       return true;
     }
+    
+    PowerMgmt::enableWiFiLightSleep();
     return false;
   }
   
-  inline void maintain(SystemState& state) {
+  inline void maintain(SystemState& state, uint32_t now) {
+    bool was_connected = state.wifi_connected;
     state.wifi_connected = (WiFi.status() == WL_CONNECTED);
-    coap.loop();
+    
+    // Track disconnect time for power management
+    if (was_connected && !state.wifi_connected) {
+      state.wifi_disconnect_time = now;
+      Serial.println("WiFi disconnected - starting disconnect timer");
+    } else if (!was_connected && state.wifi_connected) {
+      state.wifi_disconnect_time = 0;
+      PowerMgmt::enableWiFiLightSleep();
+      Serial.println("WiFi reconnected - enabling power saving");
+    }
+    
+    // Attempt reconnection with power-aware timing
+    if (!state.wifi_connected && 
+        (now - state.last_wifi_retry) > Config::WIFI_RETRY_INTERVAL_MS) {
+      Serial.println("Attempting WiFi reconnection...");
+      WiFi.reconnect();
+      state.last_wifi_retry = now;
+    }
+    
+    // Check for deep sleep condition
+    if (PowerMgmt::shouldEnterDeepSleep(state, now)) {
+      PowerMgmt::enterDeepSleep(Config::WIFI_RETRY_INTERVAL_MS);
+    }
+    
+    // Reduce CoAP loop frequency to prevent UDP errors
+    static uint32_t last_coap_loop = 0;
+    if ((now - last_coap_loop) > 1000) { // Only call every second
+      coap.loop();
+      last_coap_loop = now;
+    }
   }
 }
 
@@ -276,9 +418,9 @@ namespace Display {
         Utils::formatDisplay(line1, "A:%.1f,%.1f,%.1f", sensors.accel_x, sensors.accel_y, sensors.accel_z);
         Utils::formatDisplay(line2, "G:%.1f,%.1f,%.1f", sensors.gyro_x, sensors.gyro_y, sensors.gyro_z);
         break;
-      default: // Network
-        Utils::formatDisplay(line1, "WiFi:%s", state.wifi_connected ? "OK" : "OFF");
-        Utils::formatDisplay(line2, "CoAP TX:%lu", (unsigned long)state.coap_transmissions);
+      default: // Network & Power
+        Utils::formatDisplay(line1, "WiFi:%s %s", state.wifi_connected ? "OK" : "OFF", state.is_moving ? "MOV" : "IDLE");
+        Utils::formatDisplay(line2, "TX:%lu Mv:%.1f", (unsigned long)state.coap_transmissions, state.movement_magnitude);
         break;
     }
     
