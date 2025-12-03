@@ -488,7 +488,7 @@ namespace StateMachine {
     }
   }
 
-  inline void updateSensors(SystemState& state, SensorData& sensors, uint32_t now) {
+  inline void updateSensors(SystemState& state, SensorData& sensors, uint32_t now, ::DHT& dht, ::Adafruit_MPU6050& mpu) {
     // Adaptive sensor reading based on state
     static uint32_t next_sensor_read = 0;
     uint32_t sensor_interval;
@@ -506,9 +506,7 @@ namespace StateMachine {
     }
     
     if ((int32_t)(now - next_sensor_read) >= 0) {
-      // Read sensors based on availability - use external sensor globals
-      extern ::DHT dht;
-      extern ::Adafruit_MPU6050 mpu;
+      // Read sensors based on availability - sensors passed as parameters
       
       if (sensors.dht_ok) {
         sensors.temperature = dht.readTemperature();
