@@ -121,203 +121,6 @@ struct SystemState {
   bool button_reset = true;
 };
 
-// ===== STATE MACHINE =====
-namespace StateMachine {
-  enum State : uint8_t {
-    INIT,           // Initial startup and hardware configuration
-    WIFI_CONNECTING, // Connecting to WiFi
-    IDLE,           // Connected, no movement, low power mode
-    ACTIVE,         // Connected, movement detected, active sensing
-    DISCONNECTED,   // WiFi lost, attempting reconnection
-    DEEP_SLEEP,     // Power saving mode, periodic wake
-    ERROR           // Error state for recovery
-  };
-  
-  enum Event : uint8_t {
-    WIFI_CONNECTED,
-    WIFI_LOST,
-    MOVEMENT_DETECTED,
-    MOVEMENT_STOPPED,
-    DEEP_SLEEP_TIMEOUT,
-    SENSOR_ERROR,
-    BUTTON_PRESSED,
-    TIMER_EXPIRED
-  };
-  
-  struct Context {
-    State current_state = INIT;
-    State previous_state = INIT;
-    uint32_t state_entry_time = 0;
-    uint32_t last_transition = 0;
-    Event last_event = TIMER_EXPIRED;
-  };
-  
-  // Get state name for debugging (must be defined before transition function)
-  inline const char* getStateName(State state) {
-    switch(state) {
-      case INIT: return "INIT";
-      case WIFI_CONNECTING: return "WIFI_CONNECTING";
-      case IDLE: return "IDLE";
-      case ACTIVE: return "ACTIVE";
-      case DISCONNECTED: return "DISCONNECTED";
-      case DEEP_SLEEP: return "DEEP_SLEEP";
-      case ERROR: return "ERROR";
-      default: return "UNKNOWN";
-    }
-  }
-  
-  // State transition function
-  inline void transition(SystemState& state, State new_state, Event event = TIMER_EXPIRED) {
-    if (state.current_state != new_state) {
-      state.previous_state = state.current_state;
-      state.current_state = new_state;
-      state.state_entry_time = millis();
-      state.last_transition = millis();
-      state.last_event = event;
-      
-      Serial.printf("State: %s -> %s (event: %d)\\n", 
-                   getStateName((State)state.previous_state),
-                   getStateName((State)state.current_state), 
-                   event);
-    }
-  }
-
-  // Main state machine executor
-  inline void execute(SystemState& state, SensorData& sensors, uint32_t now) {
-    // Update WiFi status
-    state.wifi_connected = (WiFi.status() == WL_CONNECTED);
-    
-    // Check for movement in ACTIVE and IDLE states
-    if (state.current_state == ACTIVE || state.current_state == IDLE) {
-      if (sensors.mpu_ok) {
-        Utils::detectMovement(sensors, state, now);
-      }
-    }
-    
-    switch(state.current_state) {
-      case INIT:
-        // Hardware already initialized in setup()
-        if (state.wifi_connected) {
-          transition(state, IDLE, WIFI_CONNECTED);
-        } else if ((now - state.state_entry_time) > Config::WIFI_TIMEOUT_MS) {
-          transition(state, DISCONNECTED, TIMER_EXPIRED);
-        }
-        break;
-        
-      case WIFI_CONNECTING:
-        if (state.wifi_connected) {
-          transition(state, IDLE, WIFI_CONNECTED);
-        } else if ((now - state.state_entry_time) > Config::WIFI_TIMEOUT_MS) {
-          transition(state, DISCONNECTED, TIMER_EXPIRED);
-        }
-        break;
-        
-      case IDLE:
-        if (!state.wifi_connected) {
-          transition(state, DISCONNECTED, WIFI_LOST);
-        } else if (state.movement_detected) {
-          transition(state, ACTIVE, MOVEMENT_DETECTED);
-        }
-        break;
-        
-      case ACTIVE:
-        if (!state.wifi_connected) {
-          transition(state, DISCONNECTED, WIFI_LOST);
-        } else if (!state.movement_detected) {
-          // Check if we've been idle long enough
-          if ((now - state.last_movement_time) > Config::MOVEMENT_TIMEOUT_MS) {
-            transition(state, IDLE, MOVEMENT_STOPPED);
-          }
-        }
-        break;
-        
-      case DISCONNECTED:
-        if (state.wifi_connected) {
-          transition(state, IDLE, WIFI_CONNECTED);
-        } else if ((now - state.state_entry_time) > Config::DEEP_SLEEP_THRESHOLD_MS) {
-          transition(state, DEEP_SLEEP, TIMER_EXPIRED);
-        }
-        break;
-        
-      case DEEP_SLEEP:
-        // This state would typically put the device to sleep
-        // For now, just try to reconnect after timeout
-        if ((now - state.state_entry_time) > Config::DEEP_SLEEP_THRESHOLD_MS) {
-          transition(state, INIT, TIMER_EXPIRED);
-        }
-        break;
-        
-      case ERROR:
-        // Error recovery - restart after timeout
-        if ((now - state.state_entry_time) > 30000) { // 30 second error timeout
-          transition(state, INIT, TIMER_EXPIRED);
-        }
-        break;
-    }
-  }
-
-  inline void updateSensors(SystemState& state, SensorData& sensors, uint32_t now) {
-    // Adaptive sensor reading based on state
-    static uint32_t next_sensor_read = 0;
-    uint32_t sensor_interval;
-    
-    switch(state.current_state) {
-      case ACTIVE:
-        sensor_interval = Config::SENSOR_READ_ACTIVE_MS; // 500ms when active
-        break;
-      case IDLE:
-        sensor_interval = Config::SENSOR_READ_IDLE_MS; // 2s when idle
-        break;
-      default:
-        sensor_interval = Config::SENSOR_READ_IDLE_MS;
-        break;
-    }
-    
-    if ((int32_t)(now - next_sensor_read) >= 0) {
-      // Read sensors based on availability - use external sensor globals
-      extern DHT dht;
-      extern Adafruit_MPU6050 mpu;
-      
-      if (sensors.dht_ok) {
-        sensors.temperature = dht.readTemperature();
-        sensors.humidity = dht.readHumidity();
-      }
-      
-      if (sensors.mpu_ok) {
-        sensors_event_t accel_event, gyro_event, temp_event;
-        if (mpu.getEvent(&accel_event, &gyro_event, &temp_event)) {
-          sensors.accel_x = accel_event.acceleration.x;
-          sensors.accel_y = accel_event.acceleration.y;
-          sensors.accel_z = accel_event.acceleration.z;
-          sensors.gyro_x = gyro_event.gyro.x;
-          sensors.gyro_y = gyro_event.gyro.y;
-          sensors.gyro_z = gyro_event.gyro.z;
-        }
-      }
-      
-      next_sensor_read = now + sensor_interval;
-    }
-  }
-
-  inline void handleTelemetry(SystemState& state, SensorData& sensors, uint32_t now) {
-    static uint32_t next_transmission = 0;
-    
-    if ((int32_t)(now - next_transmission) >= 0) {
-      if (state.wifi_connected) {
-        bool is_heartbeat = (state.current_state == IDLE);
-        Network::sendTelemetry(state, sensors, is_heartbeat);
-        
-        // Set next transmission based on state
-        if (state.current_state == ACTIVE) {
-          next_transmission = now + Config::COAP_SEND_MOVING_MS; // 2 Hz during movement
-        } else {
-          next_transmission = now + Config::COAP_SEND_IDLE_MS; // 30 min heartbeat
-        }
-      }
-    }
-  }
-}
-
 // ===== LED SYSTEM =====
 namespace LEDSystem {
   enum Status : uint8_t {
@@ -385,7 +188,6 @@ namespace Button {
   }
 }
 
-
 // ===== UTILITY FUNCTIONS =====
 namespace Utils {
   // Movement detection based on accelerometer and gyroscope
@@ -427,62 +229,6 @@ namespace Utils {
     size_t len = strlen(dest);
     while (len < 16) dest[len++] = ' ';
     dest[16] = '\0';
-  }
-}
-
-// ===== LED CONTROL =====
-namespace LED {
-  inline void init() {
-    pinMode(Pins::LED_R, OUTPUT);
-    pinMode(Pins::LED_G, OUTPUT);
-    pinMode(Pins::LED_B, OUTPUT);
-    digitalWrite(Pins::LED_R, LOW);
-    digitalWrite(Pins::LED_G, LOW);
-    digitalWrite(Pins::LED_B, LOW);
-  }
-  
-  inline void setRed() { digitalWrite(Pins::LED_R, HIGH); digitalWrite(Pins::LED_G, LOW); digitalWrite(Pins::LED_B, LOW); }
-  inline void setBlue() { digitalWrite(Pins::LED_R, LOW); digitalWrite(Pins::LED_G, LOW); digitalWrite(Pins::LED_B, HIGH); }
-  inline void setGreen() { digitalWrite(Pins::LED_R, LOW); digitalWrite(Pins::LED_G, HIGH); digitalWrite(Pins::LED_B, LOW); }
-  inline void off() { digitalWrite(Pins::LED_R, LOW); digitalWrite(Pins::LED_G, LOW); digitalWrite(Pins::LED_B, LOW); }
-  
-  inline void updateStatus(SystemState& state, const SensorData& sensors, uint32_t now) {
-    // Determine LED status
-    if (Utils::isTheftDetected(sensors) && state.locked) {
-      state.theft_detected = true;
-    }
-    
-    if (state.theft_detected) {
-      state.led_status = LEDSystem::THEFT_ALERT;
-    } else if (!state.wifi_connected) {
-      state.led_status = LEDSystem::COAP_CONNECTING;
-    } else if (state.wifi_connected && state.coap_transmissions > 0 && (now - state.last_coap_transmission) > 30000) {
-      state.led_status = LEDSystem::COAP_ERROR;
-    } else {
-      state.led_status = LEDSystem::SYSTEM_OK;
-    }
-    
-    // Update LED based on status
-    switch (state.led_status) {
-      case LEDSystem::COAP_ERROR:
-        setRed();
-        break;
-      case LEDSystem::COAP_CONNECTING:
-        setBlue();
-        break;
-      case LEDSystem::SYSTEM_OK:
-        setGreen();
-        break;
-      case LEDSystem::THEFT_ALERT:
-        // SOS pattern
-        if ((int32_t)(now - state.led_change_time) >= 0) {
-          if (state.sos_step >= LEDSystem::SOS_PATTERN_LENGTH) state.sos_step = 0;
-          state.led_on = !state.led_on;
-          if (state.led_on) setRed(); else off();
-          state.led_change_time = now + LEDSystem::SOS_PATTERN[state.sos_step++];
-        }
-        break;
-    }
   }
 }
 
@@ -602,6 +348,260 @@ namespace Network {
     if ((now - last_coap_loop) > 1000) { // Only call every second
       coap.loop();
       last_coap_loop = now;
+    }
+  }
+}
+
+
+// ===== STATE MACHINE =====
+namespace StateMachine {
+  enum State : uint8_t {
+    INIT,           // Initial startup and hardware configuration
+    WIFI_CONNECTING, // Connecting to WiFi
+    IDLE,           // Connected, no movement, low power mode
+    ACTIVE,         // Connected, movement detected, active sensing
+    DISCONNECTED,   // WiFi lost, attempting reconnection
+    DEEP_SLEEP,     // Power saving mode, periodic wake
+    ERROR           // Error state for recovery
+  };
+  
+  enum Event : uint8_t {
+    WIFI_CONNECTED,
+    WIFI_LOST,
+    MOVEMENT_DETECTED,
+    MOVEMENT_STOPPED,
+    DEEP_SLEEP_TIMEOUT,
+    SENSOR_ERROR,
+    BUTTON_PRESSED,
+    TIMER_EXPIRED
+  };
+  
+  struct Context {
+    State current_state = INIT;
+    State previous_state = INIT;
+    uint32_t state_entry_time = 0;
+    uint32_t last_transition = 0;
+    Event last_event = TIMER_EXPIRED;
+  };
+  
+  // Get state name for debugging (must be defined before transition function)
+  inline const char* getStateName(State state) {
+    switch(state) {
+      case INIT: return "INIT";
+      case WIFI_CONNECTING: return "WIFI_CONNECTING";
+      case IDLE: return "IDLE";
+      case ACTIVE: return "ACTIVE";
+      case DISCONNECTED: return "DISCONNECTED";
+      case DEEP_SLEEP: return "DEEP_SLEEP";
+      case ERROR: return "ERROR";
+      default: return "UNKNOWN";
+    }
+  }
+  
+  // State transition function
+  inline void transition(SystemState& state, State new_state, Event event = TIMER_EXPIRED) {
+    if (state.current_state != new_state) {
+      state.previous_state = state.current_state;
+      state.current_state = new_state;
+      state.state_entry_time = millis();
+      state.last_transition = millis();
+      state.last_event = event;
+      
+      Serial.printf("State: %s -> %s (event: %d)\\n", 
+                   getStateName((State)state.previous_state),
+                   getStateName((State)state.current_state), 
+                   event);
+    }
+  }
+
+  // Main state machine executor
+  inline void execute(SystemState& state, SensorData& sensors, uint32_t now) {
+    // Update WiFi status
+    state.wifi_connected = (WiFi.status() == WL_CONNECTED);
+    
+    // Check for movement in ACTIVE and IDLE states
+    if (state.current_state == ACTIVE || state.current_state == IDLE) {
+      if (sensors.mpu_ok) {
+        ::Utils::detectMovement(sensors, state, now);
+      }
+    }
+    
+    switch(state.current_state) {
+      case INIT:
+        // Hardware already initialized in setup()
+        if (state.wifi_connected) {
+          transition(state, IDLE, WIFI_CONNECTED);
+        } else if ((now - state.state_entry_time) > Config::WIFI_TIMEOUT_MS) {
+          transition(state, DISCONNECTED, TIMER_EXPIRED);
+        }
+        break;
+        
+      case WIFI_CONNECTING:
+        if (state.wifi_connected) {
+          transition(state, IDLE, WIFI_CONNECTED);
+        } else if ((now - state.state_entry_time) > Config::WIFI_TIMEOUT_MS) {
+          transition(state, DISCONNECTED, TIMER_EXPIRED);
+        }
+        break;
+        
+      case IDLE:
+        if (!state.wifi_connected) {
+          transition(state, DISCONNECTED, WIFI_LOST);
+        } else if (state.movement_detected) {
+          transition(state, ACTIVE, MOVEMENT_DETECTED);
+        }
+        break;
+        
+      case ACTIVE:
+        if (!state.wifi_connected) {
+          transition(state, DISCONNECTED, WIFI_LOST);
+        } else if (!state.movement_detected) {
+          // Check if we've been idle long enough
+          if ((now - state.last_movement_time) > Config::MOVEMENT_TIMEOUT_MS) {
+            transition(state, IDLE, MOVEMENT_STOPPED);
+          }
+        }
+        break;
+        
+      case DISCONNECTED:
+        if (state.wifi_connected) {
+          transition(state, IDLE, WIFI_CONNECTED);
+        } else if ((now - state.state_entry_time) > Config::DEEP_SLEEP_THRESHOLD_MS) {
+          transition(state, DEEP_SLEEP, TIMER_EXPIRED);
+        }
+        break;
+        
+      case DEEP_SLEEP:
+        // This state would typically put the device to sleep
+        // For now, just try to reconnect after timeout
+        if ((now - state.state_entry_time) > Config::DEEP_SLEEP_THRESHOLD_MS) {
+          transition(state, INIT, TIMER_EXPIRED);
+        }
+        break;
+        
+      case ERROR:
+        // Error recovery - restart after timeout
+        if ((now - state.state_entry_time) > 30000) { // 30 second error timeout
+          transition(state, INIT, TIMER_EXPIRED);
+        }
+        break;
+    }
+  }
+
+  inline void updateSensors(SystemState& state, SensorData& sensors, uint32_t now) {
+    // Adaptive sensor reading based on state
+    static uint32_t next_sensor_read = 0;
+    uint32_t sensor_interval;
+    
+    switch(state.current_state) {
+      case ACTIVE:
+        sensor_interval = Config::SENSOR_READ_ACTIVE_MS; // 500ms when active
+        break;
+      case IDLE:
+        sensor_interval = Config::SENSOR_READ_IDLE_MS; // 2s when idle
+        break;
+      default:
+        sensor_interval = Config::SENSOR_READ_IDLE_MS;
+        break;
+    }
+    
+    if ((int32_t)(now - next_sensor_read) >= 0) {
+      // Read sensors based on availability - use external sensor globals
+      extern DHT dht;
+      extern Adafruit_MPU6050 mpu;
+      
+      if (sensors.dht_ok) {
+        sensors.temperature = dht.readTemperature();
+        sensors.humidity = dht.readHumidity();
+      }
+      
+      if (sensors.mpu_ok) {
+        sensors_event_t accel_event, gyro_event, temp_event;
+        if (mpu.getEvent(&accel_event, &gyro_event, &temp_event)) {
+          sensors.accel_x = accel_event.acceleration.x;
+          sensors.accel_y = accel_event.acceleration.y;
+          sensors.accel_z = accel_event.acceleration.z;
+          sensors.gyro_x = gyro_event.gyro.x;
+          sensors.gyro_y = gyro_event.gyro.y;
+          sensors.gyro_z = gyro_event.gyro.z;
+        }
+      }
+      
+      next_sensor_read = now + sensor_interval;
+    }
+  }
+
+  inline void handleTelemetry(SystemState& state, SensorData& sensors, uint32_t now) {
+    static uint32_t next_transmission = 0;
+    
+    if ((int32_t)(now - next_transmission) >= 0) {
+      if (state.wifi_connected) {
+        bool is_heartbeat = (state.current_state == IDLE);
+        ::Network::sendTelemetry(state, sensors, is_heartbeat);
+        
+        // Set next transmission based on state
+        if (state.current_state == ACTIVE) {
+          next_transmission = now + Config::COAP_SEND_MOVING_MS; // 2 Hz during movement
+        } else {
+          next_transmission = now + Config::COAP_SEND_IDLE_MS; // 30 min heartbeat
+        }
+      }
+    }
+  }
+}
+
+// ===== LED CONTROL =====
+namespace LED {
+  inline void init() {
+    pinMode(Pins::LED_R, OUTPUT);
+    pinMode(Pins::LED_G, OUTPUT);
+    pinMode(Pins::LED_B, OUTPUT);
+    digitalWrite(Pins::LED_R, LOW);
+    digitalWrite(Pins::LED_G, LOW);
+    digitalWrite(Pins::LED_B, LOW);
+  }
+  
+  inline void setRed() { digitalWrite(Pins::LED_R, HIGH); digitalWrite(Pins::LED_G, LOW); digitalWrite(Pins::LED_B, LOW); }
+  inline void setBlue() { digitalWrite(Pins::LED_R, LOW); digitalWrite(Pins::LED_G, LOW); digitalWrite(Pins::LED_B, HIGH); }
+  inline void setGreen() { digitalWrite(Pins::LED_R, LOW); digitalWrite(Pins::LED_G, HIGH); digitalWrite(Pins::LED_B, LOW); }
+  inline void off() { digitalWrite(Pins::LED_R, LOW); digitalWrite(Pins::LED_G, LOW); digitalWrite(Pins::LED_B, LOW); }
+  
+  inline void updateStatus(SystemState& state, const SensorData& sensors, uint32_t now) {
+    // Determine LED status
+    if (Utils::isTheftDetected(sensors) && state.locked) {
+      state.theft_detected = true;
+    }
+    
+    if (state.theft_detected) {
+      state.led_status = LEDSystem::THEFT_ALERT;
+    } else if (!state.wifi_connected) {
+      state.led_status = LEDSystem::COAP_CONNECTING;
+    } else if (state.wifi_connected && state.coap_transmissions > 0 && (now - state.last_coap_transmission) > 30000) {
+      state.led_status = LEDSystem::COAP_ERROR;
+    } else {
+      state.led_status = LEDSystem::SYSTEM_OK;
+    }
+    
+    // Update LED based on status
+    switch (state.led_status) {
+      case LEDSystem::COAP_ERROR:
+        setRed();
+        break;
+      case LEDSystem::COAP_CONNECTING:
+        setBlue();
+        break;
+      case LEDSystem::SYSTEM_OK:
+        setGreen();
+        break;
+      case LEDSystem::THEFT_ALERT:
+        // SOS pattern
+        if ((int32_t)(now - state.led_change_time) >= 0) {
+          if (state.sos_step >= LEDSystem::SOS_PATTERN_LENGTH) state.sos_step = 0;
+          state.led_on = !state.led_on;
+          if (state.led_on) setRed(); else off();
+          state.led_change_time = now + LEDSystem::SOS_PATTERN[state.sos_step++];
+        }
+        break;
     }
   }
 }

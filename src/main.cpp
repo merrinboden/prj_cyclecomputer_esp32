@@ -15,7 +15,7 @@ DHT dht(Pins::DHT, DHT22);
 Adafruit_MPU6050  mpu;
 LiquidCrystal_I2C lcd(Config::LCD_ADDR, 16, 2);
 ThreeWire myWire(Pins::DS1302_DAT, Pins::DS1302_CLK, Pins::DS1302_RST);
-RtcDS1302<ThreeWire> Rtc(myWire);
+RtcDS1302<ThreeWire> rtc(myWire);
 
 // === STATE ===
 SensorData sensors;
@@ -47,7 +47,7 @@ void setup() {
   sensors.mpu_ok = mpu.begin();
   Serial.printf("MPU6050: %s\n", sensors.mpu_ok ? "OK" : "FAILED");
   
-  Rtc.Begin();
+  rtc.Begin();
   
   // Network initialization
   Network::init(state);
@@ -71,7 +71,7 @@ void loop() {
   // === UI UPDATES (State-independent) ===
   Button::checkPageChange(state);
   LED::updateStatus(state, sensors, now);
-  Display::showPage(lcd, state.ui_page, sensors, state, Rtc);
+  Display::showPage(lcd, state.ui_page, sensors, state, rtc);
   
   // === NETWORK MAINTENANCE ===
   Network::maintain(state, now);
