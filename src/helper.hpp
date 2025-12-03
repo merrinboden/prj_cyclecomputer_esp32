@@ -59,8 +59,11 @@ namespace Config {
   
   // Timing intervals (ms)
   constexpr uint32_t DHT_READ_MS = 10000;  // Slower for power saving
-  constexpr uint32_t COAP_SEND_MOVING_MS = 500;  // 2 Hz during movement
-  constexpr uint32_t COAP_SEND_IDLE_MS = 1800000; // 30 min heartbeat
+  // Telemetry timing
+  // When connected and moving: send every 2 seconds
+  constexpr uint32_t COAP_SEND_MOVING_MS = 2000;  // 2s during movement
+  // When idle: send a heartbeat every 10 minutes
+  constexpr uint32_t COAP_SEND_IDLE_MS = 600000; // 10 min heartbeat
   constexpr uint32_t ACCEL_SAMPLE_MS = 50;  // 20 Hz accelerometer sampling
   constexpr uint32_t SENSOR_READ_ACTIVE_MS = 500;  // Sensor read interval when active
   constexpr uint32_t SENSOR_READ_IDLE_MS = 2000;   // Sensor read interval when idle
@@ -69,6 +72,8 @@ namespace Config {
   constexpr uint32_t MOVEMENT_TIMEOUT_MS = 10000; // 10s no movement = idle
   constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 600000; // 10 min retry when disconnected
   constexpr uint32_t DEEP_SLEEP_THRESHOLD_MS = 1800000; // 30 min disconnected = deep sleep
+  // If true, keep LED runtime available while disconnected (avoid deep sleep)
+  constexpr bool KEEP_LED_RUNTIME_WHEN_DISCONNECTED = true;
   constexpr float MOVEMENT_ACCEL_THRESHOLD = 0.1f; // m/s² for movement detection
   constexpr float MOVEMENT_GYRO_THRESHOLD = 0.5f;  // rad/s for movement detection
   
@@ -152,9 +157,11 @@ namespace PowerMgmt {
   }
   
   inline bool shouldEnterDeepSleep(const SystemState& state, uint32_t now) {
-    return !state.wifi_connected && 
-           state.wifi_disconnect_time > 0 && 
-           (now - state.wifi_disconnect_time) > Config::DEEP_SLEEP_THRESHOLD_MS;
+    if (state.wifi_connected) return false;
+    if (state.wifi_disconnect_time == 0) return false;
+    // If configuration requests keeping LED runtime while disconnected, do not deep sleep
+    if (Config::KEEP_LED_RUNTIME_WHEN_DISCONNECTED) return false;
+    return (now - state.wifi_disconnect_time) > Config::DEEP_SLEEP_THRESHOLD_MS;
   }
 }
 
@@ -466,7 +473,7 @@ namespace StateMachine {
       case DISCONNECTED:
         if (state.wifi_connected) {
           transition(state, IDLE, WIFI_CONNECTED);
-        } else if ((now - state.state_entry_time) > Config::DEEP_SLEEP_THRESHOLD_MS) {
+        } else if (!Config::KEEP_LED_RUNTIME_WHEN_DISCONNECTED && ((now - state.state_entry_time) > Config::DEEP_SLEEP_THRESHOLD_MS)) {
           transition(state, DEEP_SLEEP, TIMER_EXPIRED);
         }
         break;
@@ -536,12 +543,14 @@ namespace StateMachine {
       if (state.wifi_connected) {
         bool is_heartbeat = (state.current_state == IDLE);
         ::Network::sendTelemetry(state, sensors, is_heartbeat);
-        
+
         // Set next transmission based on state
         if (state.current_state == ACTIVE) {
-          next_transmission = now + Config::COAP_SEND_MOVING_MS; // 2 Hz during movement
+          // When connected and moving: send every Config::COAP_SEND_MOVING_MS (2s)
+          next_transmission = now + Config::COAP_SEND_MOVING_MS;
         } else {
-          next_transmission = now + Config::COAP_SEND_IDLE_MS; // 30 min heartbeat
+          // When idle: send heartbeat every Config::COAP_SEND_IDLE_MS (10min)
+          next_transmission = now + Config::COAP_SEND_IDLE_MS;
         }
       }
     }

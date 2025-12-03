@@ -35,7 +35,7 @@ void setup() {
   lcd.init();
   lcd.backlight();
   lcd.clear();
-  lcd.print("Bike Computer");
+  lcd.print("Cycle Computer");
   lcd.setCursor(0, 1);
   lcd.print("Initializing...");
   
