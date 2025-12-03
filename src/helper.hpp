@@ -507,8 +507,8 @@ namespace StateMachine {
     
     if ((int32_t)(now - next_sensor_read) >= 0) {
       // Read sensors based on availability - use external sensor globals
-      extern DHT dht;
-      extern Adafruit_MPU6050 mpu;
+      extern ::DHT dht;
+      extern ::Adafruit_MPU6050 mpu;
       
       if (sensors.dht_ok) {
         sensors.temperature = dht.readTemperature();
