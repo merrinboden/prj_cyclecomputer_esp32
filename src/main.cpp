@@ -21,14 +21,13 @@ RtcDS1302<ThreeWire> Rtc(myWire);
 SensorData sensors;
 SystemState state;
 
-// === TIMING ===
-uint32_t next_sensor_read = 0;
-uint32_t next_coap_send = 0;
-uint32_t next_accel_read = 0;
-
 void setup() {
   Serial.begin(Config::BAUD_RATE);
-  Serial.println("ESP32 Cycle Computer v2.0");
+  Serial.println("ESP32 Cycle Computer v3.0 - State Machine");
+  
+  // Initialize State Machine
+  state.current_state = StateMachine::INIT;
+  state.state_entry_time = millis();
   
   // Hardware initialization
   Wire.begin(Pins::SDA, Pins::SCL);
@@ -37,6 +36,8 @@ void setup() {
   lcd.backlight();
   lcd.clear();
   lcd.print("Bike Computer");
+  lcd.setCursor(0, 1);
+  lcd.print("Initializing...");
   
   LED::init();
   Button::init();
@@ -51,79 +52,45 @@ void setup() {
   // Network initialization
   Network::init(state);
   
-  Serial.println("Setup complete");
+  Serial.printf("Setup complete - State: %s\n", StateMachine::getStateName((StateMachine::State)state.current_state));
   lcd.clear();
 }
 
 void loop() {
   uint32_t now = millis();
   
-  // === ACCELEROMETER SAMPLING (High frequency for movement detection) ===
-  if (state.wifi_connected && (int32_t)(now - next_accel_read) >= 0) {
-    if (sensors.mpu_ok) {
-      sensors_event_t a, g, temp;
-      mpu.getEvent(&a, &g, &temp);
-      sensors.accel_x = a.acceleration.x;
-      sensors.accel_y = a.acceleration.y;
-      sensors.accel_z = a.acceleration.z;
-      sensors.gyro_x = g.gyro.x;
-      sensors.gyro_y = g.gyro.y;
-      sensors.gyro_z = g.gyro.z;
-      
-      // Detect movement
-      Utils::detectMovement(sensors, state, now);
-    }
-    next_accel_read = now + Config::ACCEL_SAMPLE_MS;
-  }
+  // === STATE MACHINE EXECUTION ===
+  StateMachine::execute(state, sensors, now);
   
-  // === DHT SENSOR READING (Low frequency) ===
-  if ((int32_t)(now - next_sensor_read) >= 0) {
-    sensors.dht_ok = false;
-    for (int attempt = 0; attempt < 2; attempt++) { // Reduced retries for power saving
-      float h = dht.readHumidity();
-      float t = dht.readTemperature();
-      if (!isnan(h) && !isnan(t)) {
-        sensors.temperature = t;
-        sensors.humidity = h;
-        sensors.dht_ok = true;
-        break;
-      }
-      delay(30); // Reduced delay
-    }
-    next_sensor_read = now + Config::DHT_READ_MS;
-  }
+  // === STATE-DRIVEN SENSOR UPDATES ===
+  StateMachine::updateSensors(state, sensors, now);
   
-  // === ADAPTIVE COAP TRANSMISSION ===
-  if ((int32_t)(now - next_coap_send) >= 0) {
-    if (state.wifi_connected) {
-      bool is_heartbeat = !state.is_moving;
-      Network::sendTelemetry(state, sensors, is_heartbeat);
-      
-      // Set next transmission time based on movement state
-      if (state.is_moving) {
-        next_coap_send = now + Config::COAP_SEND_MOVING_MS; // 2 Hz during movement
-        Serial.printf("Movement detected - next send in %dms\n", Config::COAP_SEND_MOVING_MS);
-      } else {
-        next_coap_send = now + Config::COAP_SEND_IDLE_MS; // 30 min heartbeat
-        Serial.printf("Idle state - next heartbeat in %dms\n", Config::COAP_SEND_IDLE_MS);
-      }
-    }
-  }
+  // === STATE-DRIVEN TELEMETRY ===
+  StateMachine::handleTelemetry(state, sensors, now);
   
-  // === LED STATUS UPDATE ===
-  LED::updateStatus(state, sensors, now);
-  
-  // === BUTTON & DISPLAY UPDATE ===
+  // === UI UPDATES (State-independent) ===
   Button::checkPageChange(state);
+  LED::updateStatus(state, sensors, now);
   Display::showPage(lcd, state.ui_page, sensors, state, Rtc);
   
   // === NETWORK MAINTENANCE ===
   Network::maintain(state, now);
   
-  // Variable delay based on activity state
-  if (state.is_moving) {
-    delay(20);  // Shorter delay during movement for responsive detection
-  } else {
-    delay(200); // Longer delay when idle to save power
+  // === ADAPTIVE DELAY BASED ON STATE ===
+  uint32_t delay_ms;
+  switch(state.current_state) {
+    case StateMachine::ACTIVE:
+      delay_ms = 20;   // High responsiveness during movement
+      break;
+    case StateMachine::IDLE:
+      delay_ms = 100;  // Medium responsiveness when idle
+      break;
+    case StateMachine::DISCONNECTED:
+      delay_ms = 1000; // Low power when disconnected
+      break;
+    default:
+      delay_ms = 50;   // Default moderate delay
+      break;
   }
+  delay(delay_ms);
 }
