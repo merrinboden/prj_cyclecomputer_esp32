@@ -72,8 +72,6 @@ namespace Config {
   constexpr uint32_t MOVEMENT_TIMEOUT_MS = 10000; // 10s no movement = idle
   constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 600000; // 10 min retry when disconnected
   constexpr uint32_t DEEP_SLEEP_THRESHOLD_MS = 1800000; // 30 min disconnected = deep sleep
-  // If true, keep LED runtime available while disconnected (avoid deep sleep)
-  constexpr bool KEEP_LED_RUNTIME_WHEN_DISCONNECTED = true;
   constexpr float MOVEMENT_ACCEL_THRESHOLD = 0.1f; // m/s² for movement detection
   constexpr float MOVEMENT_GYRO_THRESHOLD = 0.5f;  // rad/s for movement detection
   
@@ -83,6 +81,8 @@ namespace Config {
   
   // System settings
   constexpr uint32_t BAUD_RATE = 115200;
+  // Keep LED runtime available while disconnected to allow theft alerts
+  constexpr bool KEEP_LED_RUNTIME_WHEN_DISCONNECTED = true;
 }
 
 // ===== STATE STRUCTURES =====
@@ -124,6 +124,9 @@ struct SystemState {
   uint8_t sos_step = 0;
   bool led_on = false;
   bool button_reset = true;
+  // Low-power LED helper (keep small footprint)
+  uint32_t low_power_led_next = 0;
+  bool low_power_led_on = false;
 };
 
 // ===== LED SYSTEM =====
@@ -582,7 +585,26 @@ namespace LED {
     if (state.theft_detected) {
       state.led_status = LEDSystem::THEFT_ALERT;
     } else if (!state.wifi_connected) {
-      state.led_status = LEDSystem::COAP_CONNECTING;
+      // If configured to keep LED runtime available while disconnected, use a
+      // very low-power blink: short pulse every few seconds to indicate presence
+      if (Config::KEEP_LED_RUNTIME_WHEN_DISCONNECTED) {
+        if ((int32_t)(now - state.low_power_led_next) >= 0) {
+          state.low_power_led_on = !state.low_power_led_on;
+          if (state.low_power_led_on) {
+            // Short pulse (50 ms)
+            setBlue();
+            state.low_power_led_next = now + 50;
+          } else {
+            // Long off (5 seconds)
+            off();
+            state.low_power_led_next = now + 5000;
+          }
+        }
+        // Early-return since we've handled LED directly in low-power mode
+        return;
+      } else {
+        state.led_status = LEDSystem::COAP_CONNECTING;
+      }
     } else if (state.wifi_connected && state.coap_transmissions > 0 && (now - state.last_coap_transmission) > 30000) {
       state.led_status = LEDSystem::COAP_ERROR;
     } else {
