@@ -76,6 +76,10 @@ namespace Config {
 
   // Button settings
   constexpr uint8_t TOTAL_PAGES = 5;
+  // Button wiring: set to true if the button pulls the pin to GND when pressed
+  // (use internal INPUT_PULLUP). Set to false if the button pulls to VCC
+  // (use internal INPUT_PULLDOWN).
+  constexpr bool BUTTON_PULLUP = true;
   
   // System settings
   constexpr uint32_t BAUD_RATE = 115200;
@@ -158,7 +162,8 @@ namespace PowerMgmt {
 // ===== BUTTON CONTROL =====
 namespace Button {
   inline void init() {
-    pinMode(Pins::BTN, INPUT_PULLUP);
+    if (Config::BUTTON_PULLUP) pinMode(Pins::BTN, INPUT_PULLUP);
+    else pinMode(Pins::BTN, INPUT_PULLDOWN);
   }
   
   inline bool checkPageChange(SystemState& state) {
@@ -167,16 +172,27 @@ namespace Button {
     uint32_t now = millis();
     bool current_state = digitalRead(Pins::BTN);
     
-    // Check for button press (HIGH to LOW transition with debounce)
-    if (last_button_state == HIGH && current_state == LOW) {
+    // Check for button press (depends on pull mode)
+    // If using pull-up: idle is HIGH, press -> LOW
+    // If using pull-down: idle is LOW, press -> HIGH
+    bool pressed = false;
+    if (Config::BUTTON_PULLUP) {
+      pressed = (last_button_state == HIGH && current_state == LOW);
+    } else {
+      pressed = (last_button_state == LOW && current_state == HIGH);
+    }
+
+    if (pressed) {
       state.ui_page = (state.ui_page + 1) % Config::TOTAL_PAGES;
       last_button_change = now;
       last_button_state = current_state;
-      Serial.printf("Button pressed - Page changed to: %d\n", state.ui_page);
+      Serial.printf("Button pressed - Page changed to: %d (raw=%d)\n", state.ui_page, current_state);
       return true;
     } else if (last_button_state != current_state) {
+      // Log raw transitions for debugging (rate-limited by debounce)
       last_button_change = now;
       last_button_state = current_state;
+      Serial.printf("Button raw change: %d\n", current_state);
     }
     
     return false;
