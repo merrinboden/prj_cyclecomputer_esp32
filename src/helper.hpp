@@ -356,7 +356,10 @@ namespace Network {
     } else if (!was_connected && state.wifi_connected) {
       state.wifi_disconnect_time = 0;
       PowerMgmt::enableWiFiLightSleep();
-      Serial.println("WiFi reconnected - enabling power saving");
+      // On reconnect, ensure CoAP/UDP is (re)started and server IP is set
+      server_ip.fromString(Config::COAP_SERVER_IP);
+      coap.start();
+      Serial.println("WiFi reconnected - CoAP restarted and power saving enabled");
     }
     
     // Attempt reconnection with power-aware timing

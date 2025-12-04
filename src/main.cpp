@@ -101,5 +101,5 @@ void loop() {
   // === NETWORK MAINTENANCE ===
   Network::maintain(state, now);
   
-
+  Serial.println(millis()- now);
 }
