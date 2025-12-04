@@ -353,7 +353,7 @@ namespace StateMachine {
     IDLE,           // Connected, no movement, low power mode
     ACTIVE,         // Connected, movement detected, active sensing
     DISCONNECTED,   // WiFi lost, attempting reconnection
-    DEEP_SLEEP,     // Power saving mode, periodic wake
+    DEEP_SLEEP,     // Deep sleep mode to conserve power
     ERROR           // Error state for recovery
   };
   
@@ -384,6 +384,7 @@ namespace StateMachine {
       case ACTIVE: return "ACTIVE";
       case WIFI_CONNECTING: return "WIFI_CONNECTING";
       case DISCONNECTED: return "DISCONNECTED";
+      case DEEP_SLEEP: return "DEEP_SLEEP";
       case ERROR: return "ERROR";
       default: return "UNKNOWN";
     }
@@ -457,11 +458,21 @@ namespace StateMachine {
       case DISCONNECTED:
         if (state.wifi_connected) {
           transition(state, IDLE, WIFI_CONNECTED);
-        } else if ((now - state.state_entry_time) > Config::SLEEP_THRESHOLD_MS) {
+        } else if (!state.locked && (now - state.state_entry_time) > Config::SLEEP_THRESHOLD_MS) {
           transition(state, DEEP_SLEEP, TIMER_EXPIRED);
         }
         break;
         
+      case DEEP_SLEEP:
+        // Enter deep sleep for power saving
+        {
+          Serial.println("Entering deep sleep mode...");
+          delay(100); // Allow time for message to be sent
+          esp_sleep_enable_timer_wakeup(60000000); // Wake up after 60 seconds
+          esp_deep_sleep_start();
+        }
+        break;
+
       case ERROR:
         // Error recovery - restart after timeout
         if ((now - state.state_entry_time) > 30000) { // 30 second error timeout
@@ -631,7 +642,7 @@ namespace Display {
         Utils::formatDisplay(line2, "%.1f m", state.elevationChange);
         break;
       case 4: // Network & State
-        Utils::formatDisplay(line1, "WiFi:%s %s", state.wifi_connected ? "OK" : "OFF", StateMachine::getStateName((StateMachine::State)state.current_state));   
+        Utils::formatDisplay(line1, "WiFi:%s %s", state.wifi_connected ? "OK" : "OFF");   
         Utils::formatDisplay(line2, "TX:%lu Mv:%.1f", (unsigned long)state.coap_transmissions, state.movement_magnitude);
         break;
     }
