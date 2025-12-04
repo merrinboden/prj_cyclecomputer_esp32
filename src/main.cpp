@@ -23,7 +23,7 @@ SystemState state;
 
 void setup() {
   Serial.begin(Config::BAUD_RATE);
-  Serial.println("ESP32 Cycle Computer v3.0 - State Machine");
+  Serial.println("ESP32 Cycle Computer - State Machine");
   
   // Initialize State Machine
   state.current_state = StateMachine::INIT;

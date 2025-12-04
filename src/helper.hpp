@@ -356,7 +356,11 @@ namespace Network {
     // Reduce CoAP loop frequency to prevent UDP errors
     static uint32_t last_coap_loop = 0;
     if ((now - last_coap_loop) > 1000) { // Only call every second
-      coap.loop();
+      // Only call coap.loop() when WiFi is connected to avoid repeated
+      // UDP parse errors while offline.
+      if (state.wifi_connected) {
+        coap.loop();
+      }
       last_coap_loop = now;
     }
   }
