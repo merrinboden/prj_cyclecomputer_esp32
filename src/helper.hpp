@@ -20,7 +20,7 @@ namespace Pins {
   static const uint8_t SCL = 22;
 
   // DHT
-  static const uint8_t DHT = 34;
+  static const uint8_t DHT = 32;
 
   // MPU6050
   static const uint8_t MPU_INT = 19;
@@ -36,7 +36,7 @@ namespace Pins {
   static const uint8_t DS1302_CLK = 4; 
 
   // Button
-  static const uint8_t BTN = 32;
+  static const uint8_t BTN = 33;
 }
 
 namespace I2CAddr {
