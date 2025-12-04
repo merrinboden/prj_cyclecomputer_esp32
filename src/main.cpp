@@ -61,6 +61,24 @@ void setup() {
 }
 
 void loop() {
+  // === ADAPTIVE DELAY BASED ON STATE ===
+  uint32_t delay_ms;
+  switch(state.current_state) {
+    case StateMachine::ACTIVE:
+      delay_ms = 20;   // High responsiveness during movement
+      break;
+    case StateMachine::IDLE:
+      delay_ms = 100;  // Medium responsiveness when idle
+      break;
+    case StateMachine::DISCONNECTED:
+      delay_ms = 1000; // Low power when disconnected
+      break;
+    default:
+      delay_ms = 50;   // Default moderate delay
+      break;
+  }
+  
+  delay(delay_ms);
   uint32_t now = millis();
   
   // === STATE MACHINE EXECUTION ===
@@ -83,21 +101,5 @@ void loop() {
   // === NETWORK MAINTENANCE ===
   Network::maintain(state, now);
   
-  // === ADAPTIVE DELAY BASED ON STATE ===
-  uint32_t delay_ms;
-  switch(state.current_state) {
-    case StateMachine::ACTIVE:
-      delay_ms = 20;   // High responsiveness during movement
-      break;
-    case StateMachine::IDLE:
-      delay_ms = 100;  // Medium responsiveness when idle
-      break;
-    case StateMachine::DISCONNECTED:
-      delay_ms = 1000; // Low power when disconnected
-      break;
-    default:
-      delay_ms = 50;   // Default moderate delay
-      break;
-  }
-  delay(delay_ms);
+
 }
