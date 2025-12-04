@@ -5,6 +5,7 @@
 #include <WiFiUdp.h>
 #include <LiquidCrystal_I2C.h>
 #include <DHT.h>
+#include <DHT_U.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <RtcDS1302.h>
@@ -521,7 +522,7 @@ namespace StateMachine {
     }
   }
 
-  inline void updateSensors(SystemState& state, SensorData& sensors, uint32_t now, ::DHT& dht, ::Adafruit_MPU6050& mpu) {
+  inline void updateSensors(SystemState& state, SensorData& sensors, uint32_t now, ::DHT_Unified& dht, ::Adafruit_MPU6050& mpu) {
     // Adaptive sensor reading based on state
     static uint32_t next_sensor_read = 0;
     uint32_t sensor_interval;
@@ -542,8 +543,13 @@ namespace StateMachine {
       // Read sensors based on availability - sensors passed as parameters
       
       if (sensors.dht_ok) {
-        sensors.temperature = dht.readTemperature();
-        sensors.humidity = dht.readHumidity();
+        sensors_event_t event;
+
+        dht.temperature().getEvent(&event);
+        sensors.temperature = event.temperature;
+        
+        dht.humidity().getEvent(&event);
+        sensors.humidity = event.relative_humidity;
       }
       
       if (sensors.mpu_ok) {

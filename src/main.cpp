@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <DHT.h>
+#include <DHT_U.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <ThreeWire.h>
@@ -11,7 +12,7 @@
 #include "helper.hpp"
 
 // === GLOBAL OBJECTS ===
-DHT dht(Pins::DHT, DHT22);
+DHT_Unified dht(Pins::DHT, DHT22);
 Adafruit_MPU6050  mpu;
 LiquidCrystal_I2C lcd(I2CAddr::LCD, 16, 2);
 ThreeWire myWire(Pins::DS1302_DAT, Pins::DS1302_CLK, Pins::DS1302_RST);
@@ -44,6 +45,9 @@ void setup() {
   
   // Sensor initialization
   dht.begin();
+  sensor_t sensor;
+
+  dht.temperature().getSensor(&sensor);
   sensors.mpu_ok = mpu.begin();
   Serial.printf("MPU6050: %s\n", sensors.mpu_ok ? "OK" : "FAILED");
   
