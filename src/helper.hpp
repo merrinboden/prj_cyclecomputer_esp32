@@ -67,9 +67,13 @@ namespace Config {
   constexpr uint32_t SLEEP_THRESHOLD_MS = 300000; // 10s disconnected = sleep
   constexpr uint32_t MOVEMENT_TIMEOUT_MS = 10000; // 10s no movement = idle
   constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 600000; // 10 min retry when disconnected
-  constexpr float MOVEMENT_ACCEL_THRESHOLD = 3.0f; // m/s² for movement detection
+  constexpr float MOVEMENT_ACCEL_THRESHOLD = 2.0f; // m/s² for movement detection
   constexpr float MOVEMENT_GYRO_THRESHOLD = 5.0f;  // rad/s for movement detection
-  
+  constexpr float MOVEMENT_ACCEL_THEFT_THRESHOLD_X = 12.0f; // m/s² for movement detection
+  constexpr float MOVEMENT_ACCEL_THEFT_THRESHOLD_Y = 2.0f; // m/s² for movement detection
+  constexpr float MOVEMENT_ACCEL_THEFT_THRESHOLD_Z = 2.0f; // m/s² for movement detection
+  constexpr float MOVEMENT_GYRO_THEFT_THRESHOLD = 5.0f;  // rad/s for movement detection
+
   // Button settings
   constexpr uint8_t TOTAL_PAGES = 5;
   
@@ -206,8 +210,8 @@ namespace Utils {
   
   // Theft detection based on excessive motion
   inline bool isTheftDetected(const SensorData& sensors) {
-    return (fabsf(sensors.accel_x) > 15.0f || fabsf(sensors.accel_y) > 5.0f || fabsf(sensors.accel_z) > 5.0f || 
-            fabsf(sensors.gyro_x) > 5.0f || fabsf(sensors.gyro_y) > 5.0f || fabsf(sensors.gyro_z) > 5.0f);
+    return (fabsf(sensors.accel_x) > Config::MOVEMENT_ACCEL_THEFT_THRESHOLD_X || fabsf(sensors.accel_y) > Config::MOVEMENT_ACCEL_THEFT_THRESHOLD_Y || fabsf(sensors.accel_z) > Config::MOVEMENT_ACCEL_THEFT_THRESHOLD_Z || 
+            fabsf(sensors.gyro_x) > Config::MOVEMENT_GYRO_THEFT_THRESHOLD || fabsf(sensors.gyro_y) > Config::MOVEMENT_GYRO_THEFT_THRESHOLD || fabsf(sensors.gyro_z) > Config::MOVEMENT_GYRO_THEFT_THRESHOLD);
   }
   
   // Format display string to 16 characters
