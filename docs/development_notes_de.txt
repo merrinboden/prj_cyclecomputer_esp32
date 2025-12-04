@@ -1,4 +1,17 @@
 - Ziel des Projekts: Entwicklung eines stromsparenden Fahrrad-Computers auf ESP32-Basis.
+
+APIs:
+Weather, Temp & Time
+https://www.weatherapi.com
+60f5b48a7d7a4a47865144100250211
+
+logic:
+Ein LCD-Display zeigt in Echtzeit Uhrzeit, Temperatur/Feuchtigkeit und Bewegungsinformationen an.
+
+Parallel dient das System als Diebstahlschutz: Ein Mikrofon und ein PIN-geschützter Modus aktivieren einen Alarm bei Manipulation.
+LEDs für visuelle Warnsignale.
+So verbindet das Projekt Komfortfunktionen mit erhöhter Sicherheit im Fahrradalltag.
+
 - Implementierung einer zustandsbasierten Architektur (State Machine) für klare Ablaufsteuerung.
 - Sensorintegration: DHT11 (ich nutze aktuell DHT22) (Temperatur & Luftfeuchte) für Umgebungsdaten.
 - Sensorintegration: MPU6050 (Beschleunigung & Gyroskop) für Bewegungs- und Diebstahlerkennung.
