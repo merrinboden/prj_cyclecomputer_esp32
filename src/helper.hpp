@@ -50,12 +50,9 @@ namespace Config {
   constexpr uint32_t WIFI_TIMEOUT_MS = 15000;
   
   // CoAP configuration
-  constexpr char COAP_SERVER_IP[] = "10.192.116.238";
+  constexpr char COAP_SERVER_IP[] = "10.192.116.1";
   constexpr uint16_t COAP_SERVER_PORT = 5683;
   constexpr char COAP_RESOURCE_PATH[] = "/data";
-  
-  // LCD address
-  constexpr uint8_t LCD_ADDR = 0x27;
   
   // Timing intervals (ms)
   constexpr uint32_t DHT_READ_MS = 10000;  // Slower for power saving

@@ -13,7 +13,7 @@
 // === GLOBAL OBJECTS ===
 DHT dht(Pins::DHT, DHT22);
 Adafruit_MPU6050  mpu;
-LiquidCrystal_I2C lcd(Config::LCD_ADDR, 16, 2);
+LiquidCrystal_I2C lcd(I2CAddr::LCD, 16, 2);
 ThreeWire myWire(Pins::DS1302_DAT, Pins::DS1302_CLK, Pins::DS1302_RST);
 RtcDS1302<ThreeWire> rtc(myWire);
 
