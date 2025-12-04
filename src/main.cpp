@@ -65,6 +65,9 @@ void loop() {
   // === STATE-DRIVEN SENSOR UPDATES ===
   StateMachine::updateSensors(state, sensors, now, dht, mpu);
   
+  // === STATE-DRIVEN COMPUTE ===
+  StateMachine::calculateVeloElev(state, sensors);
+  
   // === STATE-DRIVEN TELEMETRY ===
   StateMachine::handleTelemetry(state, sensors, now);
   

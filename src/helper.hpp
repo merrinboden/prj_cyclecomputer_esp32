@@ -523,7 +523,7 @@ namespace StateMachine {
     }
   }
 
-  inline void calculateVeloIncline(SystemState& state, SensorData& sensors) {
+  inline void calculateVeloElev(SystemState& state, SensorData& sensors) {
     // Placeholder calculations - replace with actual logic
     // For example, using wheel rotations and time for speed
     state.speed_kmh = 15.0f; // Dummy constant speed // integrate acceleration for real speed
