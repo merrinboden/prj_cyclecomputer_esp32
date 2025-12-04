@@ -20,7 +20,7 @@ namespace Pins {
   static const uint8_t SCL = 22;
 
   // DHT
-  static const uint8_t DHT = 34;
+  static const uint8_t DHT = 12;
 
   // MPU6050
   static const uint8_t MPU_INT = 19;
