@@ -513,6 +513,7 @@ namespace StateMachine {
 
       case ERROR:
         // Error recovery - restart after timeout
+        Serial.println("Error mode...");
         if ((now - state.state_entry_time) > 30000) { // 30 second error timeout
           transition(state, INIT, TIMER_EXPIRED);
         }
