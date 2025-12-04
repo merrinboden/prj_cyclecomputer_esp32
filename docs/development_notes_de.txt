@@ -1,0 +1,37 @@
+- Ziel des Projekts: Entwicklung eines stromsparenden Fahrrad-Computers auf ESP32-Basis.
+- Implementierung einer zustandsbasierten Architektur (State Machine) für klare Ablaufsteuerung.
+- Sensorintegration: DHT11 (ich nutze aktuell DHT22) (Temperatur & Luftfeuchte) für Umgebungsdaten.
+- Sensorintegration: MPU6050 (Beschleunigung & Gyroskop) für Bewegungs- und Diebstahlerkennung.
+- Lokale Liveberechnung der Geschwindigkeit und Richtung aus MPU6050-Daten zur Übertragung
+- RTC: DS1302 zur Zeitsynchronisation und Anzeige auf dem LCD.
+- Anzeige: 16x2 I2C LCD via LiquidCrystal_I2C für Status- und Sensordaten.
+- Kommunikation: CoAP (Constrained Application Protocol) zur effizienten Telemetrie.
+- PlatformIO als Build- und Deployment-Tooling für Arduino-Framework auf ESP32.
+- Libraries verwaltet: DHT, Adafruit_MPU6050, CoAP-simple, LiquidCrystal_I2C, RTC.
+- Power-Management-Strategie für lange Batterielaufzeit
+- Adaptive Sendezyklen je nach Zustand (bewegend, idle, disconnected).
+- Beim Bewegen: Telemetrie alle 2 Sekunden, um aktuelle Bewegungsdaten zu verfolgen.
+- Im Idle: Herzschlag (Heartbeat) alle 10 Minuten, um Präsenz zu signalisieren.
+- Bei Verbindungsverlust: WiFi-Reconnect-Versuch alle 10 Minuten.
+- Konfigurierbare Schwellenwerte für Bewegungserkennung (Beschleunigung & Gyro).
+- LED-System für Statusanzeige: verschiedene Farben/Modi für WiFi, Fehler, OK, Diebstahl.
+- Diebstahlmodus: SOS-Pattern mit roter LED hat Priorität über alle anderen Anzeigen.
+- Netzwerk-Wiederverbindung wird mit leichtem WiFi-Sleep koordiniert, um Energie zu sparen.
+- CoAP wird in NON-Modus (nicht-bestätigend) für Energieeffizienz verwendet (UDP, fire and forget).
+- Payload-Design: kompakte JSON-Felder per CoAP zur Minimierung des Overheads.
+- Sensor-Lesezyklen sind abhängig vom Zustand (aktiv vs. idle) konfigurierbar.
+- Beim Start: Hardwareinitialisierung, Sensorchecks und Netzwerkverbindung in INIT.
+- Systemstatistik: Anzahl der CoAP-Transmissions wird gezählt und gespeichert.
+- Lokal zwischengespeicherte Telemetrie möglich bei fehlender Verbindung (Entwurf vorgesehen).
+- LED-Laufzeit-Flag: Option `KEEP_LED_RUNTIME_WHEN_DISCONNECTED` verhindert Deep-Sleep, falls gewünscht.
+- Einfache UI-Pages über Buttonwechsel (Umgebung, Zeit, Bewegung, Netzwerk/Status).
+- RTC-Anzeige auf LCD für lokale Zeitreferenz und Logs.
+- Accelerometer-basierte Bewegungserkennung nutzt Magnitudenberechnung.
+- Gyroskopdaten ergänzen die Bewegungserkennung zur Zuverlässigkeit.
+- Schutzmechanismen: sensible Operationen nur bei validen Sensor-Init-Flags.
+- Logging via Serial für Debugging während Entwicklung und Tests.
+- Skalierbarkeit: Server-seitige Entgegennahme der Telemetrie für Flottenbetrieb möglich.
+- Weiterer Schritt: Integrations-Tests mit CoAP-Server und Mobil-App für Alarmbenachrichtigung.
+- Wartbarkeit: klar strukturierter State-Machine-Code erleichtert Erweiterungen.
+- Zielergebnis: stabiles, energieeffizientes Fahrrad-Tracker-System mit Diebstahlsicherung.
+- Abschlusskriterium: stabiles Laufverhalten >2h.
