@@ -4,7 +4,7 @@
 - Sensorintegration: MPU6050 (Beschleunigung & Gyroskop) für Bewegungs- und Diebstahlerkennung.
 - Lokale Liveberechnung der Geschwindigkeit und Richtung aus MPU6050-Daten zur Übertragung
 - RTC: DS1302 zur Zeitsynchronisation und Anzeige auf dem LCD.
-- Anzeige: 16x2 I2C LCD via LiquidCrystal_I2C für Status- und Sensordaten.
+- Anzeige: 16x2 I2C LCD via LiquidCrystal_I2C für Status- und Sensordaten (Wake-on-Button-Press).
 - Kommunikation: CoAP (Constrained Application Protocol) zur effizienten Telemetrie.
 - PlatformIO als Build- und Deployment-Tooling für Arduino-Framework auf ESP32.
 - Libraries verwaltet: DHT, Adafruit_MPU6050, CoAP-simple, LiquidCrystal_I2C, RTC.
@@ -23,7 +23,7 @@
 - Beim Start: Hardwareinitialisierung, Sensorchecks und Netzwerkverbindung in INIT.
 - Systemstatistik: Anzahl der CoAP-Transmissions wird gezählt und gespeichert.
 - Lokal zwischengespeicherte Telemetrie möglich bei fehlender Verbindung (Entwurf vorgesehen).
-- LED-Laufzeit-Flag: Option `KEEP_LED_RUNTIME_WHEN_DISCONNECTED` verhindert Deep-Sleep, falls gewünscht.
+- LED-Laufzeit-Flag: Option `KEEP_LED_RUNTIME_WHEN_DISCONNECTED` verhindert Deep-Sleep, falls gewünscht. ??
 - Einfache UI-Pages über Buttonwechsel (Umgebung, Zeit, Bewegung, Netzwerk/Status).
 - RTC-Anzeige auf LCD für lokale Zeitreferenz und Logs.
 - Accelerometer-basierte Bewegungserkennung nutzt Magnitudenberechnung.
