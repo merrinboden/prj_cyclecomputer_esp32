@@ -69,8 +69,8 @@ namespace Config {
   constexpr uint32_t SLEEP_THRESHOLD_MS = 10000; // 10s disconnected = sleep
   constexpr uint32_t MOVEMENT_TIMEOUT_MS = 10000; // 10s no movement = idle
   constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 600000; // 10 min retry when disconnected
-  constexpr float MOVEMENT_ACCEL_THRESHOLD = 0.1f; // m/s² for movement detection
-  constexpr float MOVEMENT_GYRO_THRESHOLD = 0.5f;  // rad/s for movement detection
+  constexpr float MOVEMENT_ACCEL_THRESHOLD = 3.0f; // m/s² for movement detection
+  constexpr float MOVEMENT_GYRO_THRESHOLD = 5.0f;  // rad/s for movement detection
   
   // Button settings
   constexpr uint8_t TOTAL_PAGES = 5;
@@ -380,11 +380,10 @@ namespace StateMachine {
   inline const char* getStateName(State state) {
     switch(state) {
       case INIT: return "INIT";
-      case WIFI_CONNECTING: return "WIFI_CONNECTING";
       case IDLE: return "IDLE";
       case ACTIVE: return "ACTIVE";
+      case WIFI_CONNECTING: return "WIFI_CONNECTING";
       case DISCONNECTED: return "DISCONNECTED";
-      case DEEP_SLEEP: return "DEEP_SLEEP";
       case ERROR: return "ERROR";
       default: return "UNKNOWN";
     }
@@ -399,7 +398,7 @@ namespace StateMachine {
       state.last_transition = millis();
       state.last_event = event;
       
-      Serial.printf("State: %s -> %s (event: %d)\\n", 
+      Serial.printf("State: %s -> %s (event: %d)\n", 
                    getStateName((State)state.previous_state),
                    getStateName((State)state.current_state), 
                    event);
@@ -428,14 +427,6 @@ namespace StateMachine {
         }
         break;
         
-      case WIFI_CONNECTING:
-        if (state.wifi_connected) {
-          transition(state, IDLE, WIFI_CONNECTED);
-        } else if ((now - state.state_entry_time) > Config::WIFI_TIMEOUT_MS) {
-          transition(state, DISCONNECTED, TIMER_EXPIRED);
-        }
-        break;
-        
       case IDLE:
         if (!state.wifi_connected) {
           transition(state, DISCONNECTED, WIFI_LOST);
@@ -452,6 +443,14 @@ namespace StateMachine {
           if ((now - state.last_movement_time) > Config::MOVEMENT_TIMEOUT_MS) {
             transition(state, IDLE, MOVEMENT_STOPPED);
           }
+        }
+        break;
+
+      case WIFI_CONNECTING:
+        if (state.wifi_connected) {
+          transition(state, IDLE, WIFI_CONNECTED);
+        } else if ((now - state.state_entry_time) > Config::WIFI_TIMEOUT_MS) {
+          transition(state, DISCONNECTED, TIMER_EXPIRED);
         }
         break;
         
