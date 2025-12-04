@@ -66,7 +66,7 @@ namespace Config {
   constexpr uint32_t SENSOR_READ_IDLE_MS = 2000;   // Sensor read interval when idle
   
   // Power management
-  constexpr uint32_t SLEEP_THRESHOLD_MS = 10000; // 10s disconnected = sleep
+  constexpr uint32_t SLEEP_THRESHOLD_MS = 300000; // 10s disconnected = sleep
   constexpr uint32_t MOVEMENT_TIMEOUT_MS = 10000; // 10s no movement = idle
   constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 600000; // 10 min retry when disconnected
   constexpr float MOVEMENT_ACCEL_THRESHOLD = 3.0f; // m/s² for movement detection
@@ -232,11 +232,36 @@ namespace Network {
   static IPAddress server_ip;
   
   inline bool init(SystemState& state) {
-    // Set WiFi power management
+    // WiFi init with diagnostics and scan
+    Serial.println("Starting WiFi init (diagnostic mode)...");
     WiFi.mode(WIFI_STA);
+    // Ensure a clean start
+    WiFi.disconnect(true);
+    delay(100);
+
+    // Scan for nearby networks to confirm SSID is visible
+    Serial.println("Scanning for nearby WiFi networks...");
+    int n = WiFi.scanNetworks();
+    bool found = false;
+    if (n == 0) {
+      Serial.println("No networks found (scan returned 0)");
+    } else {
+      Serial.printf("%d networks found:\n", n);
+      for (int i = 0; i < n; ++i) {
+        String ss = WiFi.SSID(i);
+        int rssi = WiFi.RSSI(i);
+        String sec = WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "OPEN" : "SEC";
+        Serial.printf("  %d: %s (%d dBm) %s\n", i+1, ss.c_str(), rssi, sec.c_str());
+        if (ss == String(Config::WIFI_SSID)) found = true;
+      }
+    }
+
+    if (!found) {
+      Serial.println("Warning: target SSID not found in scan results. Check SSID or AP range.");
+    }
+
+    Serial.printf("Attempting to connect to SSID '%s'...\n", Config::WIFI_SSID);
     WiFi.begin(Config::WIFI_SSID, Config::WIFI_PASSWORD);
-    
-    Serial.print("Connecting to WiFi");
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && (millis() - start) < Config::WIFI_TIMEOUT_MS) {
       delay(500);
@@ -252,8 +277,21 @@ namespace Network {
       PowerMgmt::enableWiFiLightSleep(); // Enable power saving
       return true;
     }
-    
-    Serial.println("\nWiFi failed!");
+
+    // Print final status code for diagnostics
+    Serial.printf("WiFi failed!");
+    switch (WiFi.status()) {
+      case WL_NO_SHIELD: Serial.println("  WL_NO_SHIELD"); break;
+      case WL_IDLE_STATUS: Serial.println("  WL_IDLE_STATUS"); break;
+      case WL_NO_SSID_AVAIL: Serial.println("  WL_NO_SSID_AVAIL (SSID not in range)"); break;
+      case WL_SCAN_COMPLETED: Serial.println("  WL_SCAN_COMPLETED"); break;
+      case WL_CONNECTED: Serial.println("  WL_CONNECTED"); break;
+      case WL_CONNECT_FAILED: Serial.println("  WL_CONNECT_FAILED (auth failure)"); break;
+      case WL_CONNECTION_LOST: Serial.println("  WL_CONNECTION_LOST"); break;
+      case WL_DISCONNECTED: Serial.println("  WL_DISCONNECTED"); break;
+      default: Serial.println("  Unknown status"); break;
+    }
+
     state.wifi_disconnect_time = millis();
     return false;
   }
