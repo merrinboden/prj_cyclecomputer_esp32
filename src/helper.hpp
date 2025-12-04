@@ -55,7 +55,7 @@ namespace Config {
   constexpr char COAP_RESOURCE_PATH[] = "/data";
   
   // Timing intervals (ms)
-  constexpr uint32_t DHT_READ_MS = 10000;  // Slower for power saving
+  constexpr uint32_t DHT_READ_MS = 2000;
   // Telemetry timing
   // When connected and moving: send every 2 seconds
   constexpr uint32_t COAP_SEND_MOVING_MS = 2000;  // 2s during movement
@@ -66,35 +66,32 @@ namespace Config {
   constexpr uint32_t SENSOR_READ_IDLE_MS = 2000;   // Sensor read interval when idle
   
   // Power management
+  constexpr uint32_t SLEEP_THRESHOLD_MS = 10000; // 10s disconnected = sleep
   constexpr uint32_t MOVEMENT_TIMEOUT_MS = 10000; // 10s no movement = idle
   constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 600000; // 10 min retry when disconnected
-  constexpr uint32_t DEEP_SLEEP_THRESHOLD_MS = 1800000; // 30 min disconnected = deep sleep
   constexpr float MOVEMENT_ACCEL_THRESHOLD = 0.1f; // m/s² for movement detection
   constexpr float MOVEMENT_GYRO_THRESHOLD = 0.5f;  // rad/s for movement detection
   
   // Button settings
-  constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
-  constexpr uint8_t TOTAL_PAGES = 4;
+  constexpr uint8_t TOTAL_PAGES = 5;
   
   // System settings
   constexpr uint32_t BAUD_RATE = 115200;
-  // Keep LED runtime available while disconnected to allow theft alerts
-  constexpr bool KEEP_LED_RUNTIME_WHEN_DISCONNECTED = true;
 }
 
 // ===== STATE STRUCTURES =====
 struct SensorData {
   float temperature = NAN;
   float humidity = NAN;
-  float accel_x = 0, accel_y = 0, accel_z = 0;
-  float gyro_x = 0, gyro_y = 0, gyro_z = 0;
+  float accel_x = NAN, accel_y = NAN, accel_z = NAN;
+  float gyro_x = NAN, gyro_y = NAN, gyro_z = NAN;
   bool dht_ok = false;
   bool mpu_ok = false;
 };
 
 struct SystemState {
-  bool locked = false;
   bool wifi_connected = false;
+  bool locked = false;
   bool theft_detected = false;
   uint32_t coap_transmissions = 0;
   uint32_t last_coap_transmission = 0;
@@ -112,29 +109,31 @@ struct SystemState {
   uint32_t wifi_disconnect_time = 0;
   uint32_t last_wifi_retry = 0;
   bool is_moving = false;
+  float speed_kmh = 0.0f;
+  float elevationChange = 0.0f;
   float movement_magnitude = 0.0f;
   uint8_t ui_page = 0;
   
   // LED state
-  uint8_t led_status = 0;  // LEDSystem::COAP_CONNECTING
+  uint8_t led_status = 0;  // LEDSystem::INIT
   uint32_t led_change_time = 0;
   uint8_t sos_step = 0;
   bool led_on = false;
   bool button_reset = true;
-  // Low-power LED helper (keep small footprint)
-  uint32_t low_power_led_next = 0;
-  bool low_power_led_on = false;
 };
 
 // ===== LED SYSTEM =====
 namespace LEDSystem {
   enum Status : uint8_t {
+    INIT,            // Blue blink - System initializing
     COAP_ERROR,      // Red - CoAP/WiFi connection issues
     COAP_CONNECTING, // Blue - Connecting to WiFi/CoAP
     SYSTEM_OK,       // Green - Idle/stable/transmitting
     THEFT_ALERT      // Red SOS - Theft detected
   };
   
+  constexpr uint16_t INIT_BLINK_INTERVAL_MS = 5000; // 5000ms blink interval
+
   // SOS pattern timing (3 short, 3 long, 3 short)
   constexpr uint16_t SOS_PATTERN[] = {200, 200, 200, 200, 200, 600, 600, 200, 600, 200, 600, 600, 200, 200, 200, 200, 200, 1400};
   constexpr uint8_t SOS_PATTERN_LENGTH = sizeof(SOS_PATTERN) / sizeof(SOS_PATTERN[0]);
@@ -149,20 +148,9 @@ namespace PowerMgmt {
   inline void disableWiFiSleep() {
     WiFi.setSleep(WIFI_PS_NONE);
   }
-  
-  inline void enterDeepSleep(uint32_t sleep_time_ms) {
-    Serial.printf("Entering deep sleep for %lu ms\n", sleep_time_ms);
-    esp_sleep_enable_timer_wakeup(sleep_time_ms * 1000); // Convert to microseconds
-    esp_deep_sleep_start();
-  }
-  
-  inline bool shouldEnterDeepSleep(const SystemState& state, uint32_t now) {
-    if (state.wifi_connected) return false;
-    if (state.wifi_disconnect_time == 0) return false;
-    // If configuration requests keeping LED runtime while disconnected, do not deep sleep
-    if (Config::KEEP_LED_RUNTIME_WHEN_DISCONNECTED) return false;
-    return (now - state.wifi_disconnect_time) > Config::DEEP_SLEEP_THRESHOLD_MS;
-  }
+
+  //set conditions for sleep
+  //if state is disconnected, enter deep sleep
 }
 
 // ===== BUTTON CONTROL =====
@@ -179,13 +167,11 @@ namespace Button {
     
     // Check for button press (HIGH to LOW transition with debounce)
     if (last_button_state == HIGH && current_state == LOW) {
-      if ((now - last_button_change) > Config::BUTTON_DEBOUNCE_MS) {
-        state.ui_page = (state.ui_page + 1) % Config::TOTAL_PAGES;
-        last_button_change = now;
-        last_button_state = current_state;
-        Serial.printf("Button pressed - Page changed to: %d\n", state.ui_page);
-        return true;
-      }
+      state.ui_page = (state.ui_page + 1) % Config::TOTAL_PAGES;
+      last_button_change = now;
+      last_button_state = current_state;
+      Serial.printf("Button pressed - Page changed to: %d\n", state.ui_page);
+      return true;
     } else if (last_button_state != current_state) {
       last_button_change = now;
       last_button_state = current_state;
@@ -222,7 +208,7 @@ namespace Utils {
   
   // Theft detection based on excessive motion
   inline bool isTheftDetected(const SensorData& sensors) {
-    return (fabsf(sensors.accel_x) > 15.0f || fabsf(sensors.accel_y) > 15.0f || fabsf(sensors.accel_z) > 15.0f || 
+    return (fabsf(sensors.accel_x) > 15.0f || fabsf(sensors.accel_y) > 5.0f || fabsf(sensors.accel_z) > 5.0f || 
             fabsf(sensors.gyro_x) > 5.0f || fabsf(sensors.gyro_y) > 5.0f || fabsf(sensors.gyro_z) > 5.0f);
   }
   
@@ -294,7 +280,7 @@ namespace Network {
       snprintf(payload, sizeof(payload),
                "{\"t\":%.1f,\"h\":%.1f,\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,\"mv\":%.2f}",
                sensors.temperature, sensors.humidity,
-               sensors.accel_x, sensors.accel_y, sensors.accel_z, state.movement_magnitude);
+               state.speed_kmh, state.elevationChange, state.movement_magnitude);
     }
     
     // Use CoAP NON (non-confirmable) for power efficiency
@@ -343,11 +329,6 @@ namespace Network {
       Serial.println("Attempting WiFi reconnection...");
       WiFi.reconnect();
       state.last_wifi_retry = now;
-    }
-    
-    // Check for deep sleep condition
-    if (PowerMgmt::shouldEnterDeepSleep(state, now)) {
-      PowerMgmt::enterDeepSleep(Config::WIFI_RETRY_INTERVAL_MS);
     }
     
     // Reduce CoAP loop frequency to prevent UDP errors
@@ -477,16 +458,8 @@ namespace StateMachine {
       case DISCONNECTED:
         if (state.wifi_connected) {
           transition(state, IDLE, WIFI_CONNECTED);
-        } else if (!Config::KEEP_LED_RUNTIME_WHEN_DISCONNECTED && ((now - state.state_entry_time) > Config::DEEP_SLEEP_THRESHOLD_MS)) {
+        } else if ((now - state.state_entry_time) > Config::SLEEP_THRESHOLD_MS) {
           transition(state, DEEP_SLEEP, TIMER_EXPIRED);
-        }
-        break;
-        
-      case DEEP_SLEEP:
-        // This state would typically put the device to sleep
-        // For now, just try to reconnect after timeout
-        if ((now - state.state_entry_time) > Config::DEEP_SLEEP_THRESHOLD_MS) {
-          transition(state, INIT, TIMER_EXPIRED);
         }
         break;
         
@@ -540,6 +513,13 @@ namespace StateMachine {
     }
   }
 
+  inline void calculateVeloIncline(SystemState& state, SensorData& sensors) {
+    // Placeholder calculations - replace with actual logic
+    // For example, using wheel rotations and time for speed
+    state.speed_kmh = 15.0f; // Dummy constant speed // integrate acceleration for real speed
+    state.elevationChange = 0.0f;    // Dummy constant elevation // calculate elevation gain from acceleration
+  }
+
   inline void handleTelemetry(SystemState& state, SensorData& sensors, uint32_t now) {
     static uint32_t next_transmission = 0;
     
@@ -586,26 +566,7 @@ namespace LED {
     if (state.theft_detected) {
       state.led_status = LEDSystem::THEFT_ALERT;
     } else if (!state.wifi_connected) {
-      // If configured to keep LED runtime available while disconnected, use a
-      // very low-power blink: short pulse every few seconds to indicate presence
-      if (Config::KEEP_LED_RUNTIME_WHEN_DISCONNECTED) {
-        if ((int32_t)(now - state.low_power_led_next) >= 0) {
-          state.low_power_led_on = !state.low_power_led_on;
-          if (state.low_power_led_on) {
-            // Short pulse (50 ms)
-            setBlue();
-            state.low_power_led_next = now + 50;
-          } else {
-            // Long off (5 seconds)
-            off();
-            state.low_power_led_next = now + 5000;
-          }
-        }
-        // Early-return since we've handled LED directly in low-power mode
-        return;
-      } else {
-        state.led_status = LEDSystem::COAP_CONNECTING;
-      }
+      state.led_status = LEDSystem::INIT;
     } else if (state.wifi_connected && state.coap_transmissions > 0 && (now - state.last_coap_transmission) > 30000) {
       state.led_status = LEDSystem::COAP_ERROR;
     } else {
@@ -614,6 +575,15 @@ namespace LED {
     
     // Update LED based on status
     switch (state.led_status) {
+      case LEDSystem::INIT:
+        // Blue blink
+        if ((int32_t)(now - state.led_change_time) >= 0) {
+          state.led_on = !state.led_on;
+          if (state.led_on) setBlue(); else off();
+          state.led_change_time = now + LEDSystem::INIT_BLINK_INTERVAL_MS; // 500ms blink interval
+        }
+        break;
+
       case LEDSystem::COAP_ERROR:
         setRed();
         break;
@@ -642,22 +612,26 @@ namespace Display {
     char line1[17], line2[17];
     
     switch (page) {
-      case 0: // Environment
-        Utils::formatDisplay(line1, "T:%.1fC H:%.1f%%", sensors.temperature, sensors.humidity);
-        Utils::formatDisplay(line2, "DHT:%s MPU:%s", sensors.dht_ok ? "OK" : "ERR", sensors.mpu_ok ? "OK" : "ERR");
-        break;
-      case 1: // Time
+      case 0: // Time
         {
           RtcDateTime now = rtc.GetDateTime();
           Utils::formatDisplay(line1, "%02u:%02u:%02u", now.Hour(), now.Minute(), now.Second());
-          Utils::formatDisplay(line2, "%02u/%02u/%04u", now.Day(), now.Month(), now.Year());
+          Utils::formatDisplay(line2, "%02u/%02u/%04u", now.Day(), now.Month(), now.Year()); 
         }
+        break;
+      case 1: // Environment
+        Utils::formatDisplay(line1, "T:%.1fC H:%.1f%%", sensors.temperature, sensors.humidity);
+        Utils::formatDisplay(line2, "DHT:%s", sensors.dht_ok ? "OK" : "ERROR");
         break;
       case 2: // Motion
         Utils::formatDisplay(line1, "A:%.1f,%.1f,%.1f", sensors.accel_x, sensors.accel_y, sensors.accel_z);
         Utils::formatDisplay(line2, "G:%.1f,%.1f,%.1f", sensors.gyro_x, sensors.gyro_y, sensors.gyro_z);
         break;
-      default: // Network & State
+      case 3: // Velo
+        Utils::formatDisplay(line1, "%.1f km/h", state.speed_kmh);
+        Utils::formatDisplay(line2, "%.1f m", state.elevationChange);
+        break;
+      case 4: // Network & State
         Utils::formatDisplay(line1, "WiFi:%s %s", state.wifi_connected ? "OK" : "OFF", StateMachine::getStateName((StateMachine::State)state.current_state));   
         Utils::formatDisplay(line2, "TX:%lu Mv:%.1f", (unsigned long)state.coap_transmissions, state.movement_magnitude);
         break;
