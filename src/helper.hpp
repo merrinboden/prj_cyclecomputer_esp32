@@ -687,7 +687,7 @@ namespace Display {
         Utils::formatDisplay(line2, "%.1f m", state.elevationChange);
         break;
       case 4: // Network & State
-        Utils::formatDisplay(line1, "WiFi:%s %s", state.wifi_connected ? "OK" : "OFF");   
+        Utils::formatDisplay(line1, "WiFi:%s", state.wifi_connected ? "OK" : "OFF");   
         Utils::formatDisplay(line2, "TX:%lu Mv:%.1f", (unsigned long)state.coap_transmissions, state.movement_magnitude);
         break;
     }
