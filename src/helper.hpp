@@ -45,8 +45,8 @@ namespace I2CAddr {
 }
 namespace Config {
   // WiFi configuration
-  constexpr char WIFI_SSID[] = "FRITZ!Box 7590 PO";
-  constexpr char WIFI_PASSWORD[] = "13184973482140697269";
+  constexpr char WIFI_SSID[] = "Merrin's Pixel 8";
+  constexpr char WIFI_PASSWORD[] = "12345678";
   constexpr uint32_t WIFI_TIMEOUT_MS = 15000;
   
   // CoAP configuration
