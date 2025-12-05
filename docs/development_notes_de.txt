@@ -1,50 +1,85 @@
-- Ziel des Projekts: Entwicklung eines stromsparenden Fahrrad-Computers auf ESP32-Basis.
+Projektziel
+- Entwicklung eines stromsparenden Fahrrad-Computers auf ESP32-Basis mit Telemetrie, Anzeige und Diebstahlschutz.
 
-APIs:
-Weather, Temp & Time
-https://www.weatherapi.com
-60f5b48a7d7a4a47865144100250211
+Überblick
+- Zustandsmaschine für klare Ablaufsteuerung (INIT, WIFI_CONNECTING, IDLE, ACTIVE, DISCONNECTED, DEEP_SLEEP, ERROR).
+- Effiziente Kommunikation per CoAP/UDP; kompakte JSON-Payloads im NON-Modus.
+- 16x2 I2C-LCD zur Anzeige von Uhrzeit, Umwelt- und Bewegungsdaten; einfache UI-Pages per Button.
+- Energieoptimierung durch WiFi-Light-Sleep, adaptive Sensor- und Sendeintervalle.
 
-logic:
-Ein LCD-Display zeigt in Echtzeit Uhrzeit, Temperatur/Feuchtigkeit und Bewegungsinformationen an.
+Hardware
+- ESP32 DevKit (Arduino-Framework).
+- Sensoren: DHT22 (Temperatur/Luftfeuchte), MPU6050 (Beschleunigung/Gyro).
+- Uhr: DS1302 RTC (Zeit für Anzeige/Logs; Set auf Build-Zeit beim Flashen).
+- Anzeige: 16x2 I2C LCD (`LiquidCrystal_I2C`).
+- LED: RGB-LED für Statusmeldungen (Rot/Blau/Grün, SOS-Pattern bei Diebstahl).
+- Button: Seitenwechsel; konfigurierbar als Pull-up oder Pull-down.
 
-Parallel dient das System als Diebstahlschutz: Ein Mikrofon und ein PIN-geschützter Modus aktivieren einen Alarm bei Manipulation.
-LEDs für visuelle Warnsignale.
-So verbindet das Projekt Komfortfunktionen mit erhöhter Sicherheit im Fahrradalltag.
+Software & Bibliotheken
+- PlatformIO-Projekt mit Arduino-Core.
+- Bibliotheken: DHT_Unified, Adafruit_MPU6050, LiquidCrystal_I2C, RtcDS1302, CoAP-simple, WiFi/WiFiUDP.
+- Projektstruktur: `src/` (Logik), `lib/` (ggf. Zusatz), `docs/` (Dokumentation), `test/` (Platzhalter).
 
-- Implementierung einer zustandsbasierten Architektur (State Machine) für klare Ablaufsteuerung.
-- Sensorintegration: DHT11 (ich nutze aktuell DHT22) (Temperatur & Luftfeuchte) für Umgebungsdaten.
-- Sensorintegration: MPU6050 (Beschleunigung & Gyroskop) für Bewegungs- und Diebstahlerkennung.
-- Lokale Liveberechnung der Geschwindigkeit und Richtung aus MPU6050-Daten zur Übertragung
-- RTC: DS1302 zur Zeitsynchronisation und Anzeige auf dem LCD.
-- Anzeige: 16x2 I2C LCD via LiquidCrystal_I2C für Status- und Sensordaten (Wake-on-Button-Press).
-- Kommunikation: CoAP (Constrained Application Protocol) zur effizienten Telemetrie.
-- PlatformIO als Build- und Deployment-Tooling für Arduino-Framework auf ESP32.
-- Libraries verwaltet: DHT, Adafruit_MPU6050, CoAP-simple, LiquidCrystal_I2C, RTC.
-- Power-Management-Strategie für lange Batterielaufzeit
-- Adaptive Sendezyklen je nach Zustand (bewegend, idle, disconnected).
-- Beim Bewegen: Telemetrie alle 2 Sekunden, um aktuelle Bewegungsdaten zu verfolgen.
-- Im Idle: Herzschlag (Heartbeat) alle 10 Minuten, um Präsenz zu signalisieren.
-- Bei Verbindungsverlust: WiFi-Reconnect-Versuch alle 10 Minuten.
-- Konfigurierbare Schwellenwerte für Bewegungserkennung (Beschleunigung & Gyro).
-- LED-System für Statusanzeige: verschiedene Farben/Modi für WiFi, Fehler, OK, Diebstahl.
-- Diebstahlmodus: SOS-Pattern mit roter LED hat Priorität über alle anderen Anzeigen.
-- Netzwerk-Wiederverbindung wird mit leichtem WiFi-Sleep koordiniert, um Energie zu sparen.
-- CoAP wird in NON-Modus (nicht-bestätigend) für Energieeffizienz verwendet (UDP, fire and forget).
-- Payload-Design: kompakte JSON-Felder per CoAP zur Minimierung des Overheads.
-- Sensor-Lesezyklen sind abhängig vom Zustand (aktiv vs. idle) konfigurierbar.
-- Beim Start: Hardwareinitialisierung, Sensorchecks und Netzwerkverbindung in INIT.
-- Systemstatistik: Anzahl der CoAP-Transmissions wird gezählt und gespeichert.
-- Lokal zwischengespeicherte Telemetrie möglich bei fehlender Verbindung (Entwurf vorgesehen).
-- LED-Laufzeit-Flag: Option `KEEP_LED_RUNTIME_WHEN_DISCONNECTED` verhindert Deep-Sleep, falls gewünscht. ??
-- Einfache UI-Pages über Buttonwechsel (Umgebung, Zeit, Bewegung, Netzwerk/Status).
-- RTC-Anzeige auf LCD für lokale Zeitreferenz und Logs.
-- Accelerometer-basierte Bewegungserkennung nutzt Magnitudenberechnung.
-- Gyroskopdaten ergänzen die Bewegungserkennung zur Zuverlässigkeit.
-- Schutzmechanismen: sensible Operationen nur bei validen Sensor-Init-Flags.
-- Logging via Serial für Debugging während Entwicklung und Tests.
-- Skalierbarkeit: Server-seitige Entgegennahme der Telemetrie für Flottenbetrieb möglich.
-- Weiterer Schritt: Integrations-Tests mit CoAP-Server und Mobil-App für Alarmbenachrichtigung.
-- Wartbarkeit: klar strukturierter State-Machine-Code erleichtert Erweiterungen.
-- Zielergebnis: stabiles, energieeffizientes Fahrrad-Tracker-System mit Diebstahlsicherung.
-- Abschlusskriterium: stabiles Laufverhalten >2h.
+Zustände & Logik
+- INIT: Hardware-Init, erste Sensorchecks, WLAN-Start.
+- WIFI_CONNECTING: Verbindungsaufbau, Statusanzeige Blau.
+- IDLE: Verbunden, keine Bewegung; reduzierte Sensorfrequenz; Heartbeat alle 10 Minuten.
+- ACTIVE: Verbunden, Bewegung erkannt; Sensoren häufiger; Telemetrie alle 2 Sekunden.
+- DISCONNECTED: WLAN verloren; niedrige Aktivität; Reconnect-Versuch alle 10 Minuten.
+- DEEP_SLEEP: Tiefschlaf (optional, abhängig von LED-Laufzeitpolitik und Use-Case).
+- ERROR: Fehlerzustand mit zeitgesteuertem Neustart.
+
+Sensorik
+- DHT22: Gelesen mit `Config::DHT_READ_MS`-Throttling; Initialcheck im Setup (OK/FAILED).
+- MPU6050: Bewegungsdetektion über Magnituden von Beschleunigung und Gyro; Schwellwerte konfigurierbar.
+- Bewegung: `MOVEMENT_ACCEL_THRESHOLD`, `MOVEMENT_GYRO_THRESHOLD`; Timeout `MOVEMENT_TIMEOUT_MS`.
+- Diebstahl: Höhere Schwellwerte (X/Y/Z, Gyro) aktivieren Alarm und priorisiertes LED-SOS.
+
+Kommunikation (CoAP)
+- Server-IP/Port konfigurierbar, Re-Init von CoAP nach WLAN-Reconnect.
+- Senden:
+	- Aktiv (Bewegung): alle 2 Sekunden.
+	- Idle: Heartbeat alle 10 Minuten.
+- CoAP-Loop gedrosselt, nur bei WLAN-Verbindung ausgeführt zur Fehlervermeidung.
+
+Energie & Power-Management
+- WiFi-Light-Sleep für Grundlastreduktion, Deaktivierung kurzzeitig vor Sendevorgängen.
+- Adaptive Loop-Verzögerungen je Zustand (Active/Idle/Disconnected).
+- Optional: Tiefschlaf nach längerer Inaktivität; LED-Laufzeit kann Tiefschlaf verhindern (Diebstahl-Fokus).
+
+Anzeige & LED
+- LCD-Pages:
+	- Zeit/Datum (RTC).
+	- Umwelt (Temperatur, Luftfeuchte + DHT-Status).
+	- Bewegung (Accel/Gyro live).
+	- Netzwerk/State (WiFi-Status, lokale IP).
+- LED-Status:
+	- INIT: Blau-Blink.
+	- COAP_CONNECTING: Blau.
+	- SYSTEM_OK: Grün.
+	- COAP_ERROR: Rot.
+	- THEFT_ALERT: Rot-SOS (3 kurz, 3 lang, 3 kurz).
+
+Netzwerkdiagnostik
+- WLAN-Scan vor Verbindungsaufbau; klare Statuslogs (z. B. `WL_NO_SSID_AVAIL`).
+- Reconnect-Backoff: alle 10 Minuten; CoAP erst nach erfolgreichem WLAN-Connect starten.
+
+Build & Deployment
+- PlatformIO: Build, Upload, serielle Logs für Diagnose.
+- RTC wird beim Flashen auf Build-Zeit gesetzt (aus `__DATE__`/`__TIME__`).
+
+Fehlerbehebung (Troubleshooting)
+- WLAN verbindet nicht: SSID im 2,4 GHz-Band, nicht verborgen; Gerät näher am AP; SSID exakt prüfen.
+- DHT unzuverlässig: Stabilisierung (200 ms), Lese-Intervall erhöhen, Verkabelung/5V/3,3V und Pullup prüfen.
+- Button reagiert nicht: Pull-up/-down-Config beachten, Rohwerte loggen, Verdrahtung kontrollieren.
+- UDP-Fehler-Spam: CoAP-Loop nur bei WLAN-Verbindung ausführen.
+
+Roadmap
+- NTP-Zeitsync optional zusätzlich zur RTC.
+- Exponentielles Backoff für Reconnect, konfigurierbar.
+- Filterung/Glättung von DHT- und Bewegungsdaten.
+- Optionales Telemetrie-Buffering bei Offline-Betrieb.
+
+Hinweise
+- APIs: Optional geplante Nutzung externer Wetter-/Zeit-Dienste; aktuell lokal über RTC.
+- Zielkriterium: stabiles, energieeffizientes Laufverhalten (>1 h) mit verlässlicher Anzeige/Telemetrie.
