@@ -24,8 +24,6 @@ SystemState state;
 
 // Parse build date/time macros and return an RtcDateTime
 static RtcDateTime buildDateTimeFromMacros() {
-  // __DATE__ format: "Mmm dd yyyy" (e.g. "Dec  5 2025")
-  // __TIME__ format: "hh:mm:ss"
   char monthStr[4] = {0};
   int day = 0, year = 0;
   sscanf(__DATE__, "%3s %d %d", monthStr, &day, &year);

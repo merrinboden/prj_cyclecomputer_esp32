@@ -17,8 +17,8 @@
 // ===== CONFIGURATION CONSTANTS =====
 namespace Pins {
   // I2C
-  static const uint8_t SDA = 19;
-  static const uint8_t SCL = 21;
+  static const uint8_t SDA = 22;
+  static const uint8_t SCL = 23;
 
   // DHT
   static const uint8_t DHT = 32;
@@ -34,7 +34,7 @@ namespace Pins {
   static const uint8_t DS1302_CLK = 4; 
 
   // Button
-  static const uint8_t BTN = 23;
+  static const uint8_t BTN = 21;
 }
 
 namespace I2CAddr {
