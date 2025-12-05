@@ -75,7 +75,7 @@ namespace Config {
   constexpr float MOVEMENT_GYRO_THEFT_THRESHOLD = 5.0f;  // rad/s for movement detection
 
   // Button settings
-  constexpr uint8_t TOTAL_PAGES = 5;
+  constexpr uint8_t TOTAL_PAGES = 4;
   // Button wiring: set to true if the button pulls the pin to GND when pressed
   // (use internal INPUT_PULLUP). Set to false if the button pulls to VCC
   // (use internal INPUT_PULLDOWN).
@@ -247,6 +247,7 @@ namespace Network {
   static WiFiUDP udp;
   static Coap coap(udp, 5683);
   static IPAddress server_ip;
+  static IPAddress local_ip;
   
   inline bool init(SystemState& state) {
     // WiFi init with diagnostics and scan
@@ -286,6 +287,7 @@ namespace Network {
     }
     
     if (WiFi.status() == WL_CONNECTED) {
+      local_ip = WiFi.localIP();
       Serial.printf("\nWiFi connected: %s\n", WiFi.localIP().toString().c_str());
       state.wifi_connected = true;
       state.wifi_disconnect_time = 0;
@@ -695,13 +697,10 @@ namespace Display {
         Utils::formatDisplay(line1, "A:%.1f,%.1f,%.1f", sensors.accel_x, sensors.accel_y, sensors.accel_z);
         Utils::formatDisplay(line2, "G:%.1f,%.1f,%.1f", sensors.gyro_x, sensors.gyro_y, sensors.gyro_z);
         break;
-      case 3: // Velo
-        Utils::formatDisplay(line1, "%.1f km/h", state.speed_kmh);
-        Utils::formatDisplay(line2, "%.1f m", state.elevationChange);
-        break;
-      case 4: // Network & State
-        Utils::formatDisplay(line1, "WiFi:%s", state.wifi_connected ? "OK" : "OFF");   
-        Utils::formatDisplay(line2, "TX:%lu Mv:%.1f", (unsigned long)state.coap_transmissions, state.movement_magnitude);
+      case 3: // Network & State
+        Utils::formatDisplay(line1, "WiFi:%s", state.wifi_connected ? "OK" : "OFF");
+        Utils::formatDisplay(line2, "%s", ::Network::local_ip.toString().c_str());
+        //Utils::formatDisplay(line2, "TX:%lu Mv:%.1f", (unsigned long)state.coap_transmissions, state.movement_magnitude);
         break;
     }
     
