@@ -171,6 +171,7 @@ namespace Button {
     static uint32_t last_button_change = 0;
     uint32_t now = millis();
     bool current_state = digitalRead(Pins::BTN);
+    Serial.printf("Button read: %d\n", current_state);
     
     // Check for button press (depends on pull mode)
     // If using pull-up: idle is HIGH, press -> LOW

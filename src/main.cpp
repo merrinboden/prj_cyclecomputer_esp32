@@ -22,6 +22,26 @@ RtcDS1302<ThreeWire> rtc(myWire);
 SensorData sensors;
 SystemState state;
 
+// Parse build date/time macros and return an RtcDateTime
+static RtcDateTime buildDateTimeFromMacros() {
+  // __DATE__ format: "Mmm dd yyyy" (e.g. "Dec  5 2025")
+  // __TIME__ format: "hh:mm:ss"
+  char monthStr[4] = {0};
+  int day = 0, year = 0;
+  sscanf(__DATE__, "%3s %d %d", monthStr, &day, &year);
+
+  int month = 1;
+  const char* months = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  for (int i = 0; i < 12; ++i) {
+    if (strncmp(monthStr, months + i*3, 3) == 0) { month = i+1; break; }
+  }
+
+  int hh = 0, mm = 0, ss = 0;
+  sscanf(__TIME__, "%d:%d:%d", &hh, &mm, &ss);
+
+  return RtcDateTime(year, month, day, hh, mm, ss);
+}
+
 void setup() {
   Serial.begin(Config::BAUD_RATE);
   Serial.println("ESP32 Cycle Computer Startup...");
@@ -52,6 +72,12 @@ void setup() {
   Serial.printf("MPU6050: %s\n", sensors.mpu_ok ? "OK" : "FAILED");
   
   rtc.Begin();
+
+  // Reset RTC to build/upload time so firmware upload synchronizes device time
+  RtcDateTime buildDt = buildDateTimeFromMacros();
+  rtc.SetDateTime(buildDt);
+  Serial.printf("RTC set to build time: %02u:%02u:%02u %02u/%02u/%04u\n",
+                buildDt.Hour(), buildDt.Minute(), buildDt.Second(), buildDt.Day(), buildDt.Month(), buildDt.Year());
   
   // Network initialization
   Network::init(state);
@@ -62,6 +88,7 @@ void setup() {
 
 void loop() {
   // === ADAPTIVE DELAY BASED ON STATE ===
+  uint32_t now = millis();
   uint32_t delay_ms;
   switch(state.current_state) {
     case StateMachine::ACTIVE:
@@ -78,8 +105,7 @@ void loop() {
       break;
   }
   
-  delay(delay_ms);
-  uint32_t now = millis();
+  vTaskDelay(delay_ms / portTICK_PERIOD_MS);
   
   // === STATE MACHINE EXECUTION ===
   StateMachine::execute(state, sensors, now);
@@ -94,7 +120,10 @@ void loop() {
   StateMachine::handleTelemetry(state, sensors, now);
   
   // === UI UPDATES (State-independent) ===
-  Button::checkPageChange(state);
+  if (Button::checkPageChange(state)) {
+    // Page changed, can add additional handling if needed
+    Serial.printf("UI Page changed to %d\n", state.ui_page);
+  };
   LED::updateStatus(state, sensors, now);
   Display::showPage(lcd, state.ui_page, sensors, state, rtc);
   
