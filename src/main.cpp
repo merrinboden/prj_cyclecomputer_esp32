@@ -120,7 +120,6 @@ void loop() {
   // === UI UPDATES (State-independent) ===
   if (Button::checkPageChange(state)) {
     // Page changed, can add additional handling if needed
-    Serial.printf("UI Page changed to %d\n", state.ui_page);
   };
   LED::updateStatus(state, sensors, now);
   Display::showPage(lcd, state.ui_page, sensors, state, rtc);
