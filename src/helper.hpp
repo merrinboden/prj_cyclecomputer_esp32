@@ -700,7 +700,6 @@ namespace Display {
       case 3: // Network & State
         Utils::formatDisplay(line1, "WiFi:%s", state.wifi_connected ? "OK" : "OFF");
         Utils::formatDisplay(line2, "%s", ::Network::local_ip.toString().c_str());
-        //Utils::formatDisplay(line2, "TX:%lu Mv:%.1f", (unsigned long)state.coap_transmissions, state.movement_magnitude);
         break;
     }
     
