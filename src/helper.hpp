@@ -544,6 +544,7 @@ namespace StateMachine {
   inline void updateSensors(SystemState& state, SensorData& sensors, uint32_t now, ::DHT_Unified& dht, ::Adafruit_MPU6050& mpu) {
     // Adaptive sensor reading based on state
     static uint32_t next_sensor_read = 0;
+    static uint32_t last_dht_read = 0;
     uint32_t sensor_interval;
     
     switch(state.current_state) {
@@ -560,17 +561,17 @@ namespace StateMachine {
     
     if ((int32_t)(now - next_sensor_read) >= 0) {
       // Read sensors based on availability - sensors passed as parameters
-      
-      if (sensors.dht_ok) {
-        sensors_event_t event;
 
-        dht.temperature().getEvent(&event);
-        sensors.temperature = event.temperature;
-        
-        dht.humidity().getEvent(&event);
-        sensors.humidity = event.relative_humidity;
+      // DHT sensors must not be read too frequently; enforce DHT_READ_MS
+      if (sensors.dht_ok && (int32_t)(now - last_dht_read) >= (int32_t)Config::DHT_READ_MS) {
+        sensors_event_t temp_event, hum_event;
+        dht.temperature().getEvent(&temp_event);
+        if (!isnan(temp_event.temperature)) sensors.temperature = temp_event.temperature;
+        dht.humidity().getEvent(&hum_event);
+        if (!isnan(hum_event.relative_humidity)) sensors.humidity = hum_event.relative_humidity;
+        last_dht_read = now;
       }
-      
+
       if (sensors.mpu_ok) {
         sensors_event_t accel_event, gyro_event, temp_event;
         if (mpu.getEvent(&accel_event, &gyro_event, &temp_event)) {
@@ -582,16 +583,9 @@ namespace StateMachine {
           sensors.gyro_z = gyro_event.gyro.z;
         }
       }
-      
+
       next_sensor_read = now + sensor_interval;
     }
-  }
-
-  inline void calculateVeloElev(SystemState& state, SensorData& sensors) {
-    // Placeholder calculations - replace with actual logic
-    // For example, using wheel rotations and time for speed
-    state.speed_kmh = 15.0f; // Dummy constant speed // integrate acceleration for real speed
-    state.elevationChange = 0.0f;    // Dummy constant elevation // calculate elevation gain from acceleration
   }
 
   inline void handleTelemetry(SystemState& state, SensorData& sensors, uint32_t now) {

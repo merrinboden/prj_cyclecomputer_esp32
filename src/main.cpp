@@ -66,6 +66,13 @@ void setup() {
   sensor_t sensor;
 
   dht.temperature().getSensor(&sensor);
+  // Give DHT time to stabilize and do a first read to mark availability
+  delay(200);
+  sensors_event_t dht_event;
+  dht.temperature().getEvent(&dht_event);
+  sensors.dht_ok = !isnan(dht_event.temperature);
+  Serial.printf("DHT22: %s\n", sensors.dht_ok ? "OK" : "FAILED");
+
   sensors.mpu_ok = mpu.begin();
   Serial.printf("MPU6050: %s\n", sensors.mpu_ok ? "OK" : "FAILED");
   
@@ -110,9 +117,6 @@ void loop() {
   
   // === STATE-DRIVEN SENSOR UPDATES ===
   StateMachine::updateSensors(state, sensors, now, dht, mpu);
-  
-  // === STATE-DRIVEN COMPUTE ===
-  StateMachine::calculateVeloElev(state, sensors);
   
   // === STATE-DRIVEN TELEMETRY ===
   StateMachine::handleTelemetry(state, sensors, now);
