@@ -48,9 +48,7 @@ namespace Config {
   constexpr uint32_t WIFI_TIMEOUT_MS = 15000;
   
   // CoAP configuration
-  constexpr char COAP_SERVER_IP[] = "10.192.116.1";
   constexpr uint16_t COAP_SERVER_PORT = 5683;
-  constexpr char COAP_RESOURCE_PATH[] = "/data";
   
   // Timing intervals (ms)
   constexpr uint32_t DHT_READ_MS = 2000;
@@ -288,10 +286,10 @@ namespace Network {
     
     if (WiFi.status() == WL_CONNECTED) {
       local_ip = WiFi.localIP();
+      server_ip.fromString(local_ip.toString().substring(0, local_ip.toString().lastIndexOf('.')) + ".1");
       Serial.printf("\nWiFi connected: %s\n", WiFi.localIP().toString().c_str());
       state.wifi_connected = true;
       state.wifi_disconnect_time = 0;
-      server_ip.fromString(Config::COAP_SERVER_IP);
       coap.start();
       PowerMgmt::enableWiFiLightSleep(); // Enable power saving
       return true;
@@ -343,7 +341,7 @@ namespace Network {
     // Use CoAP NON (non-confirmable) for power efficiency
     int msgid = 0;
     try {
-      msgid = coap.send(server_ip, Config::COAP_SERVER_PORT, Config::COAP_RESOURCE_PATH, 
+      msgid = coap.send(server_ip, Config::COAP_SERVER_PORT, "", 
                        COAP_NONCON, COAP_POST, NULL, 0, (uint8_t*)payload, strlen(payload));
     } catch (...) {
       Serial.println("CoAP send failed with exception");
@@ -378,7 +376,8 @@ namespace Network {
       state.wifi_disconnect_time = 0;
       PowerMgmt::enableWiFiLightSleep();
       // On reconnect, ensure CoAP/UDP is (re)started and server IP is set
-      server_ip.fromString(Config::COAP_SERVER_IP);
+      local_ip = WiFi.localIP();
+      server_ip.fromString(local_ip.toString().substring(0, local_ip.toString().lastIndexOf('.')) + ".254");
       coap.start();
       Serial.println("WiFi reconnected - CoAP restarted and power saving enabled");
     }
