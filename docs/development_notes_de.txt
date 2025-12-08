@@ -83,3 +83,34 @@ Roadmap
 Hinweise
 - APIs: Optional geplante Nutzung externer Wetter-/Zeit-Dienste; aktuell lokal über RTC.
 - Zielkriterium: stabiles, energieeffizientes Laufverhalten (>1 h) mit verlässlicher Anzeige/Telemetrie.
+
+Systemarchitektur des ESP32 Fahrrad-Computers
+Einleitung und Systemüberblick
+Der ESP32 Fahrrad-Computer ist ein autonomes Edge-Computing-System, das speziell für den Einsatz an Fahrrädern entwickelt wurde. Es fungiert als intelligentes IoT-Gerät, das Umgebungsdaten und Bewegungsaktivitäten in Echtzeit erfasst, lokal verarbeitet und über drahtlose Kommunikationstechnologien an einen zentralen Server übermittelt. Das System ist darauf ausgelegt, sowohl als klassischer Fahrradcomputer mit Displayanzeige als auch als Telemetrie-Einheit mit Diebstahlschutzfunktion zu arbeiten.
+
+Hardware-Architektur
+Das Herzstück des Systems bildet ein ESP32 DevKit mit einem Dual-Core Xtensa LX6 Prozessor, der mit 240 MHz getaktet ist. Dieser Mikrocontroller übernimmt die zentrale Steuerung aller Peripheriegeräte und die Ausführung der Anwendungslogik. Dank seiner integrierten WiFi-Funktionalität und diversen Low-Power-Modi eignet er sich ideal für batteriebetriebene IoT-Anwendungen.
+
+Die Sensorik des Systems setzt sich aus zwei Hauptkomponenten zusammen. Für die Erfassung von Umweltdaten wird ein DHT22-Sensor verwendet, der Temperatur und relative Luftfeuchtigkeit misst. Zur Bewegungserkennung kommt ein MPU6050 zum Einsatz, ein MEMS-Sensor, der sowohl einen 3-Achsen-Beschleunigungssensor als auch ein 3-Achsen-Gyroskop vereint. Diese Kombination ermöglicht eine präzise Detektion von Fahrzuständen sowie Erschütterungen, die auf einen Diebstahlversuch hindeuten könnten.
+
+Um eine kontinuierliche und präzise Zeitmessung unabhängig von einer Netzwerkverbindung zu gewährleisten, ist das System mit einer DS1302 Echtzeituhr (RTC) ausgestattet. Diese verfügt über eine eigene Batterie-Pufferung und wird beim Flashen der Firmware automatisch mit der Build-Zeit synchronisiert.
+
+Die Interaktion mit dem Benutzer erfolgt über ein 16x2 LCD-Display, das über einen I2C-Bus angesteuert wird. Es visualisiert auf vier umschaltbaren Seiten Informationen wie Uhrzeit, Datum, aktuelle Sensorwerte sowie den Netzwerkstatus. Ergänzt wird die Anzeige durch eine RGB-LED, die den Systemstatus farblich kodiert: Blau signalisiert den Initialisierungs- oder Verbindungsstatus, Grün steht für den regulären Betrieb, und Rot warnt vor Fehlern oder einem aktiven Diebstahlalarm. Ein einfacher Drucktaster ermöglicht dem Nutzer das Durchschalten der verschiedenen Displayseiten.
+
+Software-Architektur und Zustandssteuerung
+Die Software basiert auf dem Arduino-Framework und wird mittels PlatformIO entwickelt. Die Anwendungslogik ist als Finite State Machine (Endlicher Automat) implementiert, was ein deterministisches und robustes Verhalten gewährleistet. Das System durchläuft dabei verschiedene definierte Zustände:
+
+Nach dem Start befindet sich das System im INIT-Zustand, in dem die Hardware initialisiert und die Sensoren auf Funktionsfähigkeit geprüft werden. Anschließend wechselt es in den WIFI_CONNECTING-Modus, um eine Verbindung zum konfigurierten WLAN-Netzwerk herzustellen.
+
+Im regulären Betrieb unterscheidet das System zwischen zwei Hauptzuständen: IDLE und ACTIVE. Der IDLE-Zustand wird eingenommen, wenn das Fahrrad steht. Hierbei arbeitet das System energiesparend mit reduzierter Sensor-Abtastrate und sendet nur alle 10 Minuten ein "Heartbeat"-Signal. Sobald der MPU6050-Sensor eine Bewegung registriert, die definierte Schwellwerte überschreitet, wechselt das System in den ACTIVE-Zustand. In diesem Modus werden die Sensoren hochfrequent ausgelesen und Telemetriedaten alle zwei Sekunden übertragen.
+
+Sollte die Netzwerkverbindung abreißen, geht das System in den DISCONNECTED-Zustand über, in dem es in regelmäßigen Abständen versucht, die Verbindung wiederherzustellen, ohne dabei die lokale Funktionalität (wie die Displayanzeige) zu beeinträchtigen. Kritische Systemfehler führen in den ERROR-Zustand, der nach einem Timeout einen automatischen Neustart auslöst.
+
+Kommunikation und Datenprotokoll
+Für die Datenübertragung nutzt das System das CoAP-Protokoll (Constrained Application Protocol) über UDP, was aufgrund seines geringen Overheads ideal für IoT-Anwendungen ist. Das Gerät agiert als CoAP-Client und sendet Daten per POST-Methode an den Endpunkt /data eines zentralen Servers.
+
+Die Nutzdaten werden als kompakte JSON-Objekte formatiert. Im aktiven Zustand enthält das Datenpaket umfassende Informationen, darunter Temperatur, Luftfeuchtigkeit sowie die Rohdaten der Beschleunigungs- und Gyroskopsensoren aller drei Achsen. Im Ruhezustand wird ein reduziertes Paket gesendet, das lediglich die Umweltwerte und den Status "Idle" enthält, um Bandbreite und Energie zu sparen.
+
+Energie-Management
+Ein wesentlicher Aspekt der Architektur ist das Energie-Management. Das System nutzt adaptive Verzögerungen in der Hauptschleife (Loop), die je nach Systemzustand variieren – von 500 Millisekunden im aktiven Modus bis zu mehreren Sekunden im Ruhezustand. Zusätzlich wird das WiFi-Modul in den "Light Sleep"-Modus versetzt, wenn keine Datenübertragung ansteht. Dies reduziert den Stromverbrauch signifikant, während die CPU weiterhin für die Sensorüberwachung aktiv bleibt. Ein optionaler Deep-Sleep-Modus kann das System bei längerer Inaktivität in einen Tiefschlaf versetzen, aus dem es nur durch externe Ereignisse oder Timer geweckt wird.
+Zusammenfassend stellt der ESP32 Fahrrad-Computer eine integrierte Lösung dar, die lokale Echtzeitverarbeitung mit effizienter Cloud-Konnektivität verbindet und durch ihre modulare Architektur flexibel auf verschiedene Einsatzszenarien angepasst werden kann.
