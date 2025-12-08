@@ -118,9 +118,6 @@ void loop() {
   // === STATE-DRIVEN SENSOR UPDATES ===
   StateMachine::updateSensors(state, sensors, now, dht, mpu);
   
-  // === STATE-DRIVEN TELEMETRY ===
-  StateMachine::handleTelemetry(state, sensors, now);
-  
   // === UI UPDATES (State-independent) ===
   if (Button::checkPageChange(state)) {
     // Page changed, can add additional handling if needed

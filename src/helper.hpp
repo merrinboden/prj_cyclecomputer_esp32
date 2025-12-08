@@ -52,19 +52,15 @@ namespace Config {
   
   // Timing intervals (ms)
   constexpr uint32_t DHT_READ_MS = 2000;
-  // Telemetry timing
-  // When connected and moving: send every 2 seconds
-  constexpr uint32_t COAP_SEND_MOVING_MS = 2000;  // 2s during movement
-  // When idle: send a heartbeat every 10 minutes
-  constexpr uint32_t COAP_SEND_IDLE_MS = 600000; // 10 min heartbeat
+  // Server mode: faster sampling for responsive polling
   constexpr uint32_t ACCEL_SAMPLE_MS = 50;  // 20 Hz accelerometer sampling
-  constexpr uint32_t SENSOR_READ_ACTIVE_MS = 500;  // Sensor read interval when active
-  constexpr uint32_t SENSOR_READ_IDLE_MS = 2000;   // Sensor read interval when idle
+  constexpr uint32_t SENSOR_READ_ACTIVE_MS = 200;  // Fast sensor read when active (5Hz)
+  constexpr uint32_t SENSOR_READ_IDLE_MS = 1000;   // Moderate sensor read when idle (1Hz)
   
   // Power management
   constexpr uint32_t SLEEP_THRESHOLD_MS = 300000; // 10s disconnected = sleep
   constexpr uint32_t MOVEMENT_TIMEOUT_MS = 10000; // 10s no movement = idle
-  constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 600000; // 10 min retry when disconnected
+  constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 60000; // 1 min retry when disconnected
   constexpr float MOVEMENT_ACCEL_THRESHOLD = 2.0f; // m/s² for movement detection
   constexpr float MOVEMENT_GYRO_THRESHOLD = 5.0f;  // rad/s for movement detection
   constexpr float MOVEMENT_ACCEL_THEFT_THRESHOLD_X = 12.0f; // m/s² for movement detection
@@ -74,9 +70,6 @@ namespace Config {
 
   // Button settings
   constexpr uint8_t TOTAL_PAGES = 4;
-  // Button wiring: set to true if the button pulls the pin to GND when pressed
-  // (use internal INPUT_PULLUP). Set to false if the button pulls to VCC
-  // (use internal INPUT_PULLDOWN).
   constexpr bool BUTTON_PULLUP = true;
   
   // System settings
@@ -126,12 +119,14 @@ struct SystemState {
   bool button_reset = true;
 };
 
+extern SensorData sensors;
+extern SystemState state;
+
 // ===== LED SYSTEM =====
 namespace LEDSystem {
   enum Status : uint8_t {
     INIT,            // Blue blink - System initializing
     COAP_ERROR,      // Red - CoAP/WiFi connection issues
-    COAP_CONNECTING, // Blue - Connecting to WiFi/CoAP
     SYSTEM_OK,       // Green - Idle/stable/transmitting
     THEFT_ALERT      // Red SOS - Theft detected
   };
@@ -152,9 +147,6 @@ namespace PowerMgmt {
   inline void disableWiFiSleep() {
     WiFi.setSleep(WIFI_PS_NONE);
   }
-
-  //set conditions for sleep
-  //if state is disconnected, enter deep sleep
 }
 
 // ===== BUTTON CONTROL =====
@@ -170,9 +162,6 @@ namespace Button {
     uint32_t now = millis();
     bool current_state = digitalRead(Pins::BTN);
     
-    // Check for button press (depends on pull mode)
-    // If using pull-up: idle is HIGH, press -> LOW
-    // If using pull-down: idle is LOW, press -> HIGH
     bool pressed = false;
     if (Config::BUTTON_PULLUP) {
       pressed = (last_button_state == HIGH && current_state == LOW);
@@ -246,6 +235,44 @@ namespace Network {
   static Coap coap(udp, 5683);
   static IPAddress server_ip;
   static IPAddress local_ip;
+
+  // CoAP Server Callbacks
+  void callback_telemetry(CoapPacket &packet, IPAddress ip, int port) {
+    char payload[256];
+    // Determine state char
+    const char* stateChar = "U";
+    if (state.current_state == 3) stateChar = "A"; // ACTIVE
+    else if (state.current_state == 2) stateChar = "I"; // IDLE
+    
+    snprintf(payload, sizeof(payload),
+             "{\"t\":%.1f,\"h\":%.1f,\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,\"s\":\"%s\"}",
+             sensors.temperature, sensors.humidity,
+             sensors.accel_x, sensors.accel_y, sensors.accel_z,
+             sensors.gyro_x, sensors.gyro_y, sensors.gyro_z,
+             stateChar);
+             
+    coap.sendResponse(ip, port, packet.messageid, payload, strlen(payload), COAP_CONTENT, COAP_APPLICATION_JSON, packet.token, packet.tokenlen);
+    Serial.println("Served /telemetry");
+  }
+
+  void callback_cmd(CoapPacket &packet, IPAddress ip, int port) {
+    // Simple command handler
+    char p[packet.payloadlen + 1];
+    memcpy(p, packet.payload, packet.payloadlen);
+    p[packet.payloadlen] = '\0';
+    
+    Serial.printf("Received command: %s\n", p);
+    
+    // Example: "LOCK" to lock the bike
+    if (strstr(p, "LOCK")) {
+      state.locked = true;
+    } else if (strstr(p, "UNLOCK")) {
+      state.locked = false;
+      state.theft_detected = false;
+    }
+    
+    coap.sendResponse(ip, port, packet.messageid, "OK", 2, COAP_CONTENT, COAP_TEXT_PLAIN, packet.token, packet.tokenlen);
+  }
   
   inline bool init(SystemState& state) {
     // WiFi init with diagnostics and scan
@@ -286,11 +313,18 @@ namespace Network {
     
     if (WiFi.status() == WL_CONNECTED) {
       local_ip = WiFi.localIP();
+      // server_ip is not strictly needed as server, but keeping for compatibility if needed
       server_ip.fromString(local_ip.toString().substring(0, local_ip.toString().lastIndexOf('.')) + ".1");
       Serial.printf("\nWiFi connected: %s\n", WiFi.localIP().toString().c_str());
       state.wifi_connected = true;
       state.wifi_disconnect_time = 0;
+      
+      // Start CoAP Server
+      coap.server(callback_telemetry, "telemetry");
+      coap.server(callback_cmd, "cmd");
       coap.start();
+      Serial.println("CoAP Server started on port 5683");
+      
       PowerMgmt::enableWiFiLightSleep(); // Enable power saving
       return true;
     }
@@ -313,55 +347,9 @@ namespace Network {
     return false;
   }
   
+  // Deprecated: Client push is replaced by Server pull
   inline bool sendTelemetry(SystemState& state, const SensorData& sensors, bool is_heartbeat = false) {
-    if (!state.wifi_connected || WiFi.status() != WL_CONNECTED) return false;
-    
-    // Validate server IP
-    if (server_ip == INADDR_NONE || server_ip == IPAddress(0,0,0,0)) {
-      Serial.println("Invalid server IP, skipping transmission");
-      return false;
-    }
-    
-    // Temporarily disable WiFi sleep for transmission
-    PowerMgmt::disableWiFiSleep();
-    
-    // Create compact JSON payload
-    char payload[120];
-    if (is_heartbeat) {
-      snprintf(payload, sizeof(payload),
-               "{\"t\":%.1f,\"h\":%.1f,\"hb\":1,\"tx\":%lu}",
-               sensors.temperature, sensors.humidity, state.coap_transmissions);
-    } else {
-      snprintf(payload, sizeof(payload),
-               "{\"t\":%.1f,\"h\":%.1f,\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,\"mv\":%.2f}",
-               sensors.temperature, sensors.humidity,
-               state.speed_kmh, state.elevationChange, state.movement_magnitude);
-    }
-    
-    // Use CoAP NON (non-confirmable) for power efficiency
-    int msgid = 0;
-    try {
-      msgid = coap.send(server_ip, Config::COAP_SERVER_PORT, "", 
-                       COAP_NONCON, COAP_POST, NULL, 0, (uint8_t*)payload, strlen(payload));
-    } catch (...) {
-      Serial.println("CoAP send failed with exception");
-      PowerMgmt::enableWiFiLightSleep();
-      return false;
-    }
-    
-    if (msgid > 0) {
-      state.coap_transmissions++;
-      state.last_coap_transmission = millis();
-      Serial.printf("CoAP %s: %s\n", is_heartbeat ? "heartbeat" : "data", payload);
-      
-      // Re-enable WiFi sleep after transmission
-      delay(25); // Allow transmission to complete (20ms + margin)
-      PowerMgmt::enableWiFiLightSleep();
-      return true;
-    }
-    
-    PowerMgmt::enableWiFiLightSleep();
-    return false;
+    return true; 
   }
   
   inline void maintain(SystemState& state, uint32_t now) {
@@ -379,6 +367,8 @@ namespace Network {
       local_ip = WiFi.localIP();
       server_ip.fromString(local_ip.toString().substring(0, local_ip.toString().lastIndexOf('.')) + ".254");
       coap.start();
+      coap.server(callback_telemetry, "telemetry");
+      coap.server(callback_cmd, "cmd");
       Serial.println("WiFi reconnected - CoAP restarted and power saving enabled");
     }
     
@@ -392,7 +382,7 @@ namespace Network {
     
     // Reduce CoAP loop frequency to prevent UDP errors
     static uint32_t last_coap_loop = 0;
-    if ((now - last_coap_loop) > 1000) { // Only call every second
+    if ((now - last_coap_loop) > 100) { // Check more frequently for server responsiveness (100ms)
       // Only call coap.loop() when WiFi is connected to avoid repeated
       // UDP parse errors while offline.
       if (state.wifi_connected) {
@@ -408,12 +398,9 @@ namespace Network {
 namespace StateMachine {
   enum State : uint8_t {
     INIT,           // Initial startup and hardware configuration
-    WIFI_CONNECTING, // Connecting to WiFi
     IDLE,           // Connected, no movement, low power mode
     ACTIVE,         // Connected, movement detected, active sensing
-    DISCONNECTED,   // WiFi lost, attempting reconnection
-    DEEP_SLEEP,     // Deep sleep mode to conserve power
-    ERROR           // Error state for recovery
+    DISCONNECTED    // WiFi lost, attempting reconnection
   };
   
   enum Event : uint8_t {
@@ -441,10 +428,7 @@ namespace StateMachine {
       case INIT: return "INIT";
       case IDLE: return "IDLE";
       case ACTIVE: return "ACTIVE";
-      case WIFI_CONNECTING: return "WIFI_CONNECTING";
       case DISCONNECTED: return "DISCONNECTED";
-      case DEEP_SLEEP: return "DEEP_SLEEP";
-      case ERROR: return "ERROR";
       default: return "UNKNOWN";
     }
   }
@@ -505,39 +489,12 @@ namespace StateMachine {
           }
         }
         break;
-
-      case WIFI_CONNECTING:
-        if (state.wifi_connected) {
-          transition(state, IDLE, WIFI_CONNECTED);
-        } else if ((now - state.state_entry_time) > Config::WIFI_TIMEOUT_MS) {
-          transition(state, DISCONNECTED, TIMER_EXPIRED);
-        }
-        break;
         
       case DISCONNECTED:
         if (state.wifi_connected) {
           transition(state, IDLE, WIFI_CONNECTED);
-        } else if (!state.locked && (now - state.state_entry_time) > Config::SLEEP_THRESHOLD_MS) {
-          transition(state, DEEP_SLEEP, TIMER_EXPIRED);
         }
-        break;
-        
-      case DEEP_SLEEP:
-        // Enter deep sleep for power saving
-        {
-          Serial.println("Entering deep sleep mode...");
-          delay(100); // Allow time for message to be sent
-          esp_sleep_enable_timer_wakeup(60000000); // Wake up after 60 seconds
-          esp_deep_sleep_start();
-        }
-        break;
-
-      case ERROR:
-        // Error recovery - restart after timeout
-        Serial.println("Error mode...");
-        if ((now - state.state_entry_time) > 30000) { // 30 second error timeout
-          transition(state, INIT, TIMER_EXPIRED);
-        }
+        // Server mode: stay available, no deep sleep
         break;
     }
   }
@@ -588,26 +545,6 @@ namespace StateMachine {
       next_sensor_read = now + sensor_interval;
     }
   }
-
-  inline void handleTelemetry(SystemState& state, SensorData& sensors, uint32_t now) {
-    static uint32_t next_transmission = 0;
-    
-    if ((int32_t)(now - next_transmission) >= 0) {
-      if (state.wifi_connected) {
-        bool is_heartbeat = (state.current_state == IDLE);
-        ::Network::sendTelemetry(state, sensors, is_heartbeat);
-
-        // Set next transmission based on state
-        if (state.current_state == ACTIVE) {
-          // When connected and moving: send every Config::COAP_SEND_MOVING_MS (2s)
-          next_transmission = now + Config::COAP_SEND_MOVING_MS;
-        } else {
-          // When idle: send heartbeat every Config::COAP_SEND_IDLE_MS (10min)
-          next_transmission = now + Config::COAP_SEND_IDLE_MS;
-        }
-      }
-    }
-  }
 }
 
 // ===== LED CONTROL =====
@@ -655,9 +592,6 @@ namespace LED {
 
       case LEDSystem::COAP_ERROR:
         setRed();
-        break;
-      case LEDSystem::COAP_CONNECTING:
-        setBlue();
         break;
       case LEDSystem::SYSTEM_OK:
         setGreen();

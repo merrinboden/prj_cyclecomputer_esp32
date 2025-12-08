@@ -2,10 +2,10 @@ Projektziel
 - Entwicklung eines stromsparenden Fahrrad-Computers auf ESP32-Basis mit Telemetrie, Anzeige und Diebstahlschutz.
 
 Überblick
-- Zustandsmaschine für klare Ablaufsteuerung (INIT, WIFI_CONNECTING, IDLE, ACTIVE, DISCONNECTED, DEEP_SLEEP, ERROR).
-- Effiziente Kommunikation per CoAP/UDP; kompakte JSON-Payloads im NON-Modus.
+- Vereinfachte Zustandsmaschine (INIT, IDLE, ACTIVE, DISCONNECTED) für klare Ablaufsteuerung.
+- CoAP-Server-Architektur: ESP32 hostet Ressourcen, Android-App pollt Telemetriedaten.
 - 16x2 I2C-LCD zur Anzeige von Uhrzeit, Umwelt- und Bewegungsdaten; einfache UI-Pages per Button.
-- Energieoptimierung durch WiFi-Light-Sleep, adaptive Sensor- und Sendeintervalle.
+- Energieoptimierung durch WiFi-Light-Sleep und adaptive Sensor-Abtastrate.
 
 Hardware
 - ESP32 DevKit (Arduino-Framework).
@@ -21,13 +21,10 @@ Software & Bibliotheken
 - Projektstruktur: `src/` (Logik), `lib/` (ggf. Zusatz), `docs/` (Dokumentation), `test/` (Platzhalter).
 
 Zustände & Logik
-- INIT: Hardware-Init, erste Sensorchecks, WLAN-Start.
-- WIFI_CONNECTING: Verbindungsaufbau, Statusanzeige Blau.
-- IDLE: Verbunden, keine Bewegung; reduzierte Sensorfrequenz; Heartbeat alle 10 Minuten.
-- ACTIVE: Verbunden, Bewegung erkannt; Sensoren häufiger; Telemetrie alle 2 Sekunden.
-- DISCONNECTED: WLAN verloren; niedrige Aktivität; Reconnect-Versuch alle 10 Minuten.
-- DEEP_SLEEP: Tiefschlaf (optional, abhängig von LED-Laufzeitpolitik und Use-Case).
-- ERROR: Fehlerzustand mit zeitgesteuertem Neustart.
+- INIT: Hardware-Init, erste Sensorchecks, WLAN-Start, CoAP-Server-Initialisierung.
+- IDLE: Verbunden, keine Bewegung; Sensorfrequenz 1 Hz (1s Intervall); Server bereit für Anfragen.
+- ACTIVE: Verbunden, Bewegung erkannt; Sensorfrequenz 5 Hz (200ms Intervall); Server bereit für Anfragen.
+- DISCONNECTED: WLAN verloren; Reconnect-Versuch alle 10 Minuten; Display bleibt funktional.
 
 Sensorik
 - DHT22: Gelesen mit `Config::DHT_READ_MS`-Throttling; Initialcheck im Setup (OK/FAILED).
@@ -35,17 +32,20 @@ Sensorik
 - Bewegung: `MOVEMENT_ACCEL_THRESHOLD`, `MOVEMENT_GYRO_THRESHOLD`; Timeout `MOVEMENT_TIMEOUT_MS`.
 - Diebstahl: Höhere Schwellwerte (X/Y/Z, Gyro) aktivieren Alarm und priorisiertes LED-SOS.
 
-Kommunikation (CoAP)
-- Server-IP/Port konfigurierbar, Re-Init von CoAP nach WLAN-Reconnect.
-- Senden:
-	- Aktiv (Bewegung): alle 2 Sekunden.
-	- Idle: Heartbeat alle 10 Minuten.
-- CoAP-Loop gedrosselt, nur bei WLAN-Verbindung ausgeführt zur Fehlervermeidung.
+Kommunikation (CoAP-Server)
+- ESP32 agiert als CoAP-Server auf Port 5683.
+- Ressourcen:
+	- /telemetry (GET): Liefert aktuelle Sensordaten als JSON.
+	- /cmd (POST): Empfängt Befehle (z.B. "LOCK", "UNLOCK").
+- Android-App pollt Daten nach Bedarf (empfohlen: 1-2s Intervall).
+- CoAP-Loop läuft mit 100ms Intervall für responsive Serverantworten.
+- Re-Init von CoAP-Server nach WLAN-Reconnect.
 
 Energie & Power-Management
-- WiFi-Light-Sleep für Grundlastreduktion, Deaktivierung kurzzeitig vor Sendevorgängen.
-- Adaptive Loop-Verzögerungen je Zustand (Active/Idle/Disconnected).
-- Optional: Tiefschlaf nach längerer Inaktivität; LED-Laufzeit kann Tiefschlaf verhindern (Diebstahl-Fokus).
+- WiFi-Light-Sleep für Grundlastreduktion (bleibt während Server-Betrieb aktiv).
+- Adaptive Loop-Verzögerungen: Active=20ms, Idle=100ms, Disconnected=1000ms.
+- Adaptive Sensor-Abtastrate: Active=200ms (5Hz), Idle=1000ms (1Hz).
+- Kein Deep-Sleep im Server-Modus (für permanente Verfügbarkeit).
 
 Anzeige & LED
 - LCD-Pages:
@@ -98,19 +98,70 @@ Um eine kontinuierliche und präzise Zeitmessung unabhängig von einer Netzwerkv
 Die Interaktion mit dem Benutzer erfolgt über ein 16x2 LCD-Display, das über einen I2C-Bus angesteuert wird. Es visualisiert auf vier umschaltbaren Seiten Informationen wie Uhrzeit, Datum, aktuelle Sensorwerte sowie den Netzwerkstatus. Ergänzt wird die Anzeige durch eine RGB-LED, die den Systemstatus farblich kodiert: Blau signalisiert den Initialisierungs- oder Verbindungsstatus, Grün steht für den regulären Betrieb, und Rot warnt vor Fehlern oder einem aktiven Diebstahlalarm. Ein einfacher Drucktaster ermöglicht dem Nutzer das Durchschalten der verschiedenen Displayseiten.
 
 Software-Architektur und Zustandssteuerung
-Die Software basiert auf dem Arduino-Framework und wird mittels PlatformIO entwickelt. Die Anwendungslogik ist als Finite State Machine (Endlicher Automat) implementiert, was ein deterministisches und robustes Verhalten gewährleistet. Das System durchläuft dabei verschiedene definierte Zustände:
+Die Software basiert auf dem Arduino-Framework und wird mittels PlatformIO entwickelt. Die Anwendungslogik ist als vereinfachte Finite State Machine implementiert, was ein deterministisches und robustes Verhalten gewährleistet. Das System durchläuft dabei vier definierte Zustände:
 
-Nach dem Start befindet sich das System im INIT-Zustand, in dem die Hardware initialisiert und die Sensoren auf Funktionsfähigkeit geprüft werden. Anschließend wechselt es in den WIFI_CONNECTING-Modus, um eine Verbindung zum konfigurierten WLAN-Netzwerk herzustellen.
+Nach dem Start befindet sich das System im INIT-Zustand, in dem die Hardware initialisiert, die Sensoren auf Funktionsfähigkeit geprüft werden und der CoAP-Server gestartet wird. Bei erfolgreicher WLAN-Verbindung wechselt es direkt in den IDLE-Zustand.
 
-Im regulären Betrieb unterscheidet das System zwischen zwei Hauptzuständen: IDLE und ACTIVE. Der IDLE-Zustand wird eingenommen, wenn das Fahrrad steht. Hierbei arbeitet das System energiesparend mit reduzierter Sensor-Abtastrate und sendet nur alle 10 Minuten ein "Heartbeat"-Signal. Sobald der MPU6050-Sensor eine Bewegung registriert, die definierte Schwellwerte überschreitet, wechselt das System in den ACTIVE-Zustand. In diesem Modus werden die Sensoren hochfrequent ausgelesen und Telemetriedaten alle zwei Sekunden übertragen.
+Im regulären Betrieb unterscheidet das System zwischen zwei Hauptzuständen: IDLE und ACTIVE. Der IDLE-Zustand wird eingenommen, wenn das Fahrrad steht. Hierbei arbeitet das System energiesparend mit reduzierter Sensor-Abtastrate von 1 Hz. Sobald der MPU6050-Sensor eine Bewegung registriert, die definierte Schwellwerte überschreitet, wechselt das System in den ACTIVE-Zustand. In diesem Modus werden die Sensoren mit 5 Hz ausgelesen, um präzise Bewegungsdaten bereitzustellen.
 
-Sollte die Netzwerkverbindung abreißen, geht das System in den DISCONNECTED-Zustand über, in dem es in regelmäßigen Abständen versucht, die Verbindung wiederherzustellen, ohne dabei die lokale Funktionalität (wie die Displayanzeige) zu beeinträchtigen. Kritische Systemfehler führen in den ERROR-Zustand, der nach einem Timeout einen automatischen Neustart auslöst.
+Sollte die Netzwerkverbindung abreißen, geht das System in den DISCONNECTED-Zustand über, in dem es alle 10 Minuten versucht, die Verbindung wiederherzustellen, ohne dabei die lokale Funktionalität (wie die Displayanzeige) zu beeinträchtigen. Der CoAP-Server bleibt verfügbar, sobald die Verbindung wiederhergestellt ist.
 
 Kommunikation und Datenprotokoll
-Für die Datenübertragung nutzt das System das CoAP-Protokoll (Constrained Application Protocol) über UDP, was aufgrund seines geringen Overheads ideal für IoT-Anwendungen ist. Das Gerät agiert als CoAP-Client und sendet Daten per POST-Methode an den Endpunkt /data eines zentralen Servers.
+Für die Datenübertragung nutzt das System das CoAP-Protokoll (Constrained Application Protocol) über UDP, was aufgrund seines geringen Overheads ideal für IoT-Anwendungen ist. Das Gerät agiert als CoAP-Server und hostet Ressourcen, die von einer Android-App abgefragt werden können.
 
-Die Nutzdaten werden als kompakte JSON-Objekte formatiert. Im aktiven Zustand enthält das Datenpaket umfassende Informationen, darunter Temperatur, Luftfeuchtigkeit sowie die Rohdaten der Beschleunigungs- und Gyroskopsensoren aller drei Achsen. Im Ruhezustand wird ein reduziertes Paket gesendet, das lediglich die Umweltwerte und den Status "Idle" enthält, um Bandbreite und Energie zu sparen.
+Die Nutzdaten werden als kompakte JSON-Objekte formatiert. Unabhängig vom Zustand (IDLE oder ACTIVE) enthält das Datenpaket immer vollständige Informationen: Temperatur, Luftfeuchtigkeit sowie die Rohdaten der Beschleunigungs- und Gyroskopsensoren aller drei Achsen. Ein Statusfeld ("s") kennzeichnet den aktuellen Zustand: "A" für Active (Bewegung) oder "I" für Idle (Ruhe).
 
 Energie-Management
 Ein wesentlicher Aspekt der Architektur ist das Energie-Management. Das System nutzt adaptive Verzögerungen in der Hauptschleife (Loop), die je nach Systemzustand variieren – von 500 Millisekunden im aktiven Modus bis zu mehreren Sekunden im Ruhezustand. Zusätzlich wird das WiFi-Modul in den "Light Sleep"-Modus versetzt, wenn keine Datenübertragung ansteht. Dies reduziert den Stromverbrauch signifikant, während die CPU weiterhin für die Sensorüberwachung aktiv bleibt. Ein optionaler Deep-Sleep-Modus kann das System bei längerer Inaktivität in einen Tiefschlaf versetzen, aus dem es nur durch externe Ereignisse oder Timer geweckt wird.
 Zusammenfassend stellt der ESP32 Fahrrad-Computer eine integrierte Lösung dar, die lokale Echtzeitverarbeitung mit effizienter Cloud-Konnektivität verbindet und durch ihre modulare Architektur flexibel auf verschiedene Einsatzszenarien angepasst werden kann.
+
+### Detaillierte Beschreibung der CoAP-Schnittstelle
+
+Das Gerät agiert als **CoAP-Server** und hostet Ressourcen, die von einer Android-App abgerufen werden.
+
+*   **Protokoll:** CoAP (Constrained Application Protocol) über UDP.
+*   **Port:** `5683` (Standard CoAP-Port)
+*   **Architektur:** ESP32 als Server, Android-App als Client
+
+#### Verfügbare Ressourcen:
+
+**1. `/telemetry` (GET)**
+*   **Zweck:** Abruf aktueller Sensordaten
+*   **Methode:** `GET`
+*   **Response:** CoAP ACK mit JSON-Payload
+*   **Content-Type:** `application/json`
+*   **Polling-Empfehlung:** 1-2 Sekunden für Echtzeit-Updates
+*   **Payload-Struktur:**
+    ```json
+    {
+      "t": 24.5,    // Temperatur (Celsius)
+      "h": 55.2,    // Luftfeuchtigkeit (%)
+      "ax": 0.12,   // Beschleunigung X (m/s²)
+      "ay": -0.05,  // Beschleunigung Y (m/s²)
+      "az": 0.98,   // Beschleunigung Z (m/s²)
+      "gx": 0.01,   // Gyro X (rad/s)
+      "gy": 0.02,   // Gyro Y (rad/s)
+      "gz": -0.01,  // Gyro Z (rad/s)
+      "s": "A"      // Status: "A" für Active, "I" für Idle
+    }
+    ```
+
+**2. `/cmd` (POST)**
+*   **Zweck:** Senden von Befehlen an das Gerät
+*   **Methode:** `POST`
+*   **Payload:** Text (z.B. "LOCK", "UNLOCK")
+*   **Response:** "OK" bei Erfolg
+*   **Verwendung:** Fahrrad sperren/entsperren, Diebstahlalarm zurücksetzen
+
+#### Android-Client-Implementierung:
+
+```kotlin
+// Telemetrie abrufen (Polling)
+val client = CoapClient("coap://[ESP32-IP]:5683/telemetry")
+val response = client.get()
+val json = JSONObject(response.responseText)
+
+// Befehl senden
+val cmdClient = CoapClient("coap://[ESP32-IP]:5683/cmd")
+cmdClient.post("LOCK", MediaTypeRegistry.TEXT_PLAIN)
+```
