@@ -263,7 +263,6 @@ namespace Network {
     
     Serial.printf("Received command: %s\n", p);
     
-    // Example: "LOCK" to lock the bike
     if (strstr(p, "LOCK")) {
       state.locked = true;
     } else if (strstr(p, "UNLOCK")) {
