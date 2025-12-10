@@ -362,13 +362,17 @@ namespace Network {
     } else if (!was_connected && state.wifi_connected) {
       state.wifi_disconnect_time = 0;
       PowerMgmt::enableWiFiLightSleep();
-      // On reconnect, ensure CoAP/UDP is (re)started and server IP is set
+      
+      // On reconnect, update IP and restart CoAP server
       local_ip = WiFi.localIP();
       server_ip.fromString(local_ip.toString().substring(0, local_ip.toString().lastIndexOf('.')) + ".254");
+      Serial.printf("WiFi reconnected - IP: %s\n", local_ip.toString().c_str());
+      
+      // Restart CoAP server with fresh resources
       coap.start();
       coap.server(callback_telemetry, "telemetry");
       coap.server(callback_cmd, "cmd");
-      Serial.println("WiFi reconnected - CoAP restarted and power saving enabled");
+      Serial.println("CoAP Server restarted - power saving enabled");
     }
     
     // Attempt reconnection with power-aware timing
