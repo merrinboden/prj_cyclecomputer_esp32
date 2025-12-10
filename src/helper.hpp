@@ -70,6 +70,7 @@ namespace Config {
 
   // Button settings
   constexpr uint8_t TOTAL_PAGES = 4;
+  constexpr uint32_t LCD_BACKLIGHT_TIMEOUT_MS = 30000; // 30 seconds
   constexpr bool BUTTON_PULLUP = true;
   
   // System settings
@@ -117,6 +118,10 @@ struct SystemState {
   uint8_t sos_step = 0;
   bool led_on = false;
   bool button_reset = true;
+  
+  // LCD backlight state
+  bool lcd_backlight_on = true;
+  uint32_t last_button_press = 0;
 };
 
 extern SensorData sensors;
@@ -171,6 +176,8 @@ namespace Button {
 
     if (pressed) {
       state.ui_page = (state.ui_page + 1) % Config::TOTAL_PAGES;
+      state.last_button_press = now;
+      state.lcd_backlight_on = true; // Turn on backlight on button press
       last_button_change = now;
       last_button_state = current_state;
       Serial.printf("Button pressed - Page changed to: %d (raw=%d)\n", state.ui_page, current_state);
@@ -615,6 +622,20 @@ namespace LED {
 // ===== DISPLAY =====
 namespace Display {
   inline void showPage(LiquidCrystal_I2C& lcd, uint8_t page, const SensorData& sensors, const SystemState& state, RtcDS1302<ThreeWire>& rtc) {
+    // Manage LCD backlight timeout
+    uint32_t now = millis();
+    bool backlight_should_be_on = (now - state.last_button_press) < Config::LCD_BACKLIGHT_TIMEOUT_MS;
+    
+    // Only change backlight state if it differs from current
+    if (backlight_should_be_on && !state.lcd_backlight_on) {
+      lcd.backlight();
+      const_cast<SystemState&>(state).lcd_backlight_on = true;
+    } else if (!backlight_should_be_on && state.lcd_backlight_on) {
+      lcd.noBacklight();
+      const_cast<SystemState&>(state).lcd_backlight_on = false;
+      Serial.println("LCD backlight off (timeout)");
+    }
+    
     char line1[17], line2[17];
     
     switch (page) {
