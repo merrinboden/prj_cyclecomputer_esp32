@@ -175,6 +175,16 @@ namespace Button {
     }
 
     if (pressed) {
+      // If backlight is off, just turn it on without changing page
+      if (!state.lcd_backlight_on) {
+        state.last_button_press = now;
+        last_button_change = now;
+        last_button_state = current_state;
+        Serial.println("Button pressed - Backlight reactivated");
+        return false; // Don't trigger page change
+      }
+      
+      // Backlight is on, change page
       state.ui_page = (state.ui_page + 1) % Config::TOTAL_PAGES;
       state.last_button_press = now;
       last_button_change = now;
@@ -283,6 +293,7 @@ namespace Network {
     // WiFi init with diagnostics and scan
     Serial.println("Starting WiFi init (diagnostic mode)...");
     WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(false); // Disable auto-reconnect, we handle it manually
     // Ensure a clean start
     WiFi.disconnect(true);
     delay(100);
@@ -308,13 +319,14 @@ namespace Network {
       Serial.println("Warning: target SSID not found in scan results. Check SSID or AP range.");
     }
 
-    Serial.printf("Attempting to connect to SSID '%s'...\n", Config::WIFI_SSID);
+    Serial.printf("Attempting to connect to SSID '%s'...", Config::WIFI_SSID);
     WiFi.begin(Config::WIFI_SSID, Config::WIFI_PASSWORD);
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && (millis() - start) < Config::WIFI_TIMEOUT_MS) {
       delay(500);
       Serial.print(".");
     }
+    Serial.print("\n");
     
     if (WiFi.status() == WL_CONNECTED) {
       local_ip = WiFi.localIP();
@@ -369,32 +381,31 @@ namespace Network {
       Serial.println("WiFi disconnected - UDP stopped");
     } else if (!was_connected && state.wifi_connected) {
       state.wifi_disconnect_time = 0;
+      WiFi.setAutoReconnect(true); // Re-enable auto-reconnect once connected
       PowerMgmt::enableWiFiLightSleep();
       
-      // On reconnect, update IP and restart CoAP server
+      // On connect/reconnect, update IP and restart CoAP server
       local_ip = WiFi.localIP();
       server_ip.fromString(local_ip.toString().substring(0, local_ip.toString().lastIndexOf('.')) + ".254");
-      Serial.printf("WiFi reconnected - IP: %s\n", local_ip.toString().c_str());
+      Serial.printf("WiFi (re)connected - IP: %s\n", local_ip.toString().c_str());
       
-      // Fully restart UDP and CoAP server to clear stale socket state
+      // Always fully restart UDP and CoAP server to ensure clean state
+      // This handles both manual reconnects and automatic background connects
+      udp.stop(); // Stop any existing socket
       delay(100); // Allow network stack to stabilize
       coap.start();
       coap.server(callback_telemetry, "telemetry");
       coap.server(callback_cmd, "cmd");
-      Serial.println("CoAP Server restarted (UDP reinitialized) - power saving enabled");
+      Serial.println("CoAP Server (re)started - UDP initialized - power saving enabled");
     }
     
     // Attempt reconnection with power-aware timing
     if (!state.wifi_connected && 
         (now - state.last_wifi_retry) > Config::WIFI_RETRY_INTERVAL_MS) {
-      // Only attempt if not already trying to connect
-      wl_status_t status = WiFi.status();
-      if (status == WL_DISCONNECTED || status == WL_CONNECTION_LOST || status == WL_CONNECT_FAILED) {
-        Serial.println("Attempting WiFi reconnection...");
-        state.last_wifi_retry = now;
-        // Use non-blocking begin instead of reconnect to avoid UI lag
-        WiFi.begin(Config::WIFI_SSID, Config::WIFI_PASSWORD);
-      }
+      Serial.printf("Attempting WiFi reconnection...\n");
+      state.last_wifi_retry = now;
+      // Use non-blocking begin() to avoid UI lag
+      WiFi.begin(Config::WIFI_SSID, Config::WIFI_PASSWORD);
     }
     
     // Reduce CoAP loop frequency to prevent UDP errors
@@ -468,8 +479,7 @@ namespace StateMachine {
 
   // Main state machine executor
   inline void execute(SystemState& state, SensorData& sensors, uint32_t now) {
-    // Update WiFi status
-    state.wifi_connected = (WiFi.status() == WL_CONNECTED);
+    // WiFi status is updated by Network::maintain()
     
     // Check for movement in ACTIVE and IDLE states
     if (state.current_state == ACTIVE || state.current_state == IDLE) {
@@ -582,14 +592,14 @@ namespace LED {
   
   inline void updateStatus(SystemState& state, const SensorData& sensors, uint32_t now) {
     // Determine LED status
-    if (Utils::isTheftDetected(sensors) && state.locked) {
-      state.theft_detected = true;
+    if (state.locked){
+      if (Utils::isTheftDetected(sensors)) {
+        state.theft_detected = true;
+      }
     }
     
     if (state.theft_detected) {
       state.led_status = LEDSystem::THEFT_ALERT;
-    } else if (!state.wifi_connected) {
-      state.led_status = LEDSystem::INIT;
     } else if (state.wifi_connected && state.coap_transmissions > 0 && (now - state.last_coap_transmission) > 30000) {
       state.led_status = LEDSystem::COAP_ERROR;
     } else {
