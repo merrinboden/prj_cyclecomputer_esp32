@@ -177,10 +177,9 @@ namespace Button {
     if (pressed) {
       state.ui_page = (state.ui_page + 1) % Config::TOTAL_PAGES;
       state.last_button_press = now;
-      state.lcd_backlight_on = true; // Turn on backlight on button press
       last_button_change = now;
       last_button_state = current_state;
-      Serial.printf("Button pressed - Page changed to: %d (raw=%d)\n", state.ui_page, current_state);
+      Serial.printf("Button pressed - Page changed to: %d\n", state.ui_page);
       return true;
     } else if (last_button_state != current_state) {
       // Log raw transitions for debugging (rate-limited by debounce)
@@ -375,19 +374,22 @@ namespace Network {
       server_ip.fromString(local_ip.toString().substring(0, local_ip.toString().lastIndexOf('.')) + ".254");
       Serial.printf("WiFi reconnected - IP: %s\n", local_ip.toString().c_str());
       
-      // Restart CoAP server with fresh resources
+      // Fully restart UDP and CoAP server to clear stale socket state
+      udp.stop();
+      delay(100); // Allow socket cleanup
       coap.start();
       coap.server(callback_telemetry, "telemetry");
       coap.server(callback_cmd, "cmd");
-      Serial.println("CoAP Server restarted - power saving enabled");
+      Serial.println("CoAP Server restarted (UDP reinitialized) - power saving enabled");
     }
     
     // Attempt reconnection with power-aware timing
     if (!state.wifi_connected && 
         (now - state.last_wifi_retry) > Config::WIFI_RETRY_INTERVAL_MS) {
       Serial.println("Attempting WiFi reconnection...");
-      WiFi.reconnect();
       state.last_wifi_retry = now;
+      WiFi.reconnect();
+      
     }
     
     // Reduce CoAP loop frequency to prevent UDP errors
@@ -621,19 +623,23 @@ namespace LED {
 
 // ===== DISPLAY =====
 namespace Display {
-  inline void showPage(LiquidCrystal_I2C& lcd, uint8_t page, const SensorData& sensors, const SystemState& state, RtcDS1302<ThreeWire>& rtc) {
+  inline void showPage(LiquidCrystal_I2C& lcd, uint8_t page, const SensorData& sensors, SystemState& state, RtcDS1302<ThreeWire>& rtc) {
     // Manage LCD backlight timeout
     uint32_t now = millis();
-    bool backlight_should_be_on = (now - state.last_button_press) < Config::LCD_BACKLIGHT_TIMEOUT_MS;
     
-    // Only change backlight state if it differs from current
-    if (backlight_should_be_on && !state.lcd_backlight_on) {
-      lcd.backlight();
-      const_cast<SystemState&>(state).lcd_backlight_on = true;
-    } else if (!backlight_should_be_on && state.lcd_backlight_on) {
-      lcd.noBacklight();
-      const_cast<SystemState&>(state).lcd_backlight_on = false;
-      Serial.println("LCD backlight off (timeout)");
+    // Check if backlight should timeout or turn on
+    if (state.last_button_press > 0) {
+      bool should_be_on = (now - state.last_button_press) < Config::LCD_BACKLIGHT_TIMEOUT_MS;
+      
+      if (should_be_on && !state.lcd_backlight_on) {
+        lcd.backlight();
+        state.lcd_backlight_on = true;
+        Serial.println("LCD backlight on (button activity)");
+      } else if (!should_be_on && state.lcd_backlight_on) {
+        lcd.noBacklight();
+        state.lcd_backlight_on = false;
+        Serial.println("LCD backlight off (timeout)");
+      }
     }
     
     char line1[17], line2[17];

@@ -87,6 +87,9 @@ void setup() {
   // Network initialization
   Network::init(state);
   
+  // Initialize LCD backlight timer
+  state.last_button_press = millis();
+  
   Serial.printf("Setup complete - State: %s\n", StateMachine::getStateName((StateMachine::State)state.current_state));
   lcd.clear();
 }

@@ -5,7 +5,7 @@ Projektziel
 - Vereinfachte Zustandsmaschine (INIT, IDLE, ACTIVE, DISCONNECTED) für klare Ablaufsteuerung.
 - CoAP-Server-Architektur: ESP32 hostet Ressourcen, Android-App pollt Telemetriedaten.
 - 16x2 I2C-LCD zur Anzeige von Uhrzeit, Umwelt- und Bewegungsdaten; einfache UI-Pages per Button.
-- Energieoptimierung durch WiFi-Light-Sleep und adaptive Sensor-Abtastrate.
+- Energieoptimierung durch adaptive Sensor-Abtastrate und Loop-Verzögerungen.
 
 Hardware
 - ESP32 DevKit (Arduino-Framework).
@@ -13,7 +13,7 @@ Hardware
 - Uhr: DS1302 RTC (Zeit für Anzeige/Logs; Set auf Build-Zeit beim Flashen).
 - Anzeige: 16x2 I2C LCD (`LiquidCrystal_I2C`).
 - LED: RGB-LED für Statusmeldungen (Rot/Blau/Grün, SOS-Pattern bei Diebstahl).
-- Button: Seitenwechsel; konfigurierbar als Pull-up oder Pull-down.
+- Button: Seitenwechsel und Backlight-Aktivierung; konfigurierbar per `Config::BUTTON_PULLUP` (true=Pull-up, false=Pull-down).
 
 Software & Bibliotheken
 - PlatformIO-Projekt mit Arduino-Core.
@@ -27,10 +27,11 @@ Zustände & Logik
 - DISCONNECTED: WLAN verloren; Reconnect-Versuch alle 10 Minuten; Display bleibt funktional.
 
 Sensorik
-- DHT22: Gelesen mit `Config::DHT_READ_MS`-Throttling; Initialcheck im Setup (OK/FAILED).
+- DHT22: Gelesen mit `Config::DHT_READ_MS`-Throttling (2000ms); Initialcheck im Setup (OK/FAILED).
 - MPU6050: Bewegungsdetektion über Magnituden von Beschleunigung und Gyro; Schwellwerte konfigurierbar.
-- Bewegung: `MOVEMENT_ACCEL_THRESHOLD`, `MOVEMENT_GYRO_THRESHOLD`; Timeout `MOVEMENT_TIMEOUT_MS`.
-- Diebstahl: Höhere Schwellwerte (X/Y/Z, Gyro) aktivieren Alarm und priorisiertes LED-SOS.
+- Bewegung: `MOVEMENT_ACCEL_THRESHOLD` (2.0 m/s²), `MOVEMENT_GYRO_THRESHOLD` (5.0 rad/s); Timeout `MOVEMENT_TIMEOUT_MS` (10s).
+- Diebstahl: Separate höhere Schwellwerte (`THEFT_THRESHOLD_X/Y/Z`, `GYRO_THEFT_THRESHOLD`); nur aktiv wenn `state.locked == true`.
+  - LOCK-Befehl aktiviert Überwachung, UNLOCK deaktiviert und setzt Alarm zurück.
 
 Kommunikation (CoAP-Server)
 - ESP32 agiert als CoAP-Server auf Port 5683.
@@ -42,7 +43,7 @@ Kommunikation (CoAP-Server)
 - Re-Init von CoAP-Server nach WLAN-Reconnect.
 
 Energie & Power-Management
-- WiFi-Light-Sleep für Grundlastreduktion (bleibt während Server-Betrieb aktiv).
+- WiFi-Light-Sleep ist **deaktiviert** (`disableWiFiSleep()`) für zuverlässige CoAP-Server-Verfügbarkeit.
 - Adaptive Loop-Verzögerungen: Active=20ms, Idle=100ms, Disconnected=1000ms.
 - Adaptive Sensor-Abtastrate: Active=200ms (5Hz), Idle=1000ms (1Hz).
 - Kein Deep-Sleep im Server-Modus (für permanente Verfügbarkeit).
@@ -53,12 +54,16 @@ Anzeige & LED
 	- Umwelt (Temperatur, Luftfeuchte + DHT-Status).
 	- Bewegung (Accel/Gyro live).
 	- Netzwerk/State (WiFi-Status, lokale IP).
-- LED-Status:
-	- INIT: Blau-Blink.
-	- COAP_CONNECTING: Blau.
-	- SYSTEM_OK: Grün.
-	- COAP_ERROR: Rot.
-	- THEFT_ALERT: Rot-SOS (3 kurz, 3 lang, 3 kurz).
+- LCD-Hintergrundbeleuchtung:
+	- Automatisches Timeout nach 30 Sekunden Inaktivität.
+	- Reaktivierung durch Tastendruck.
+	- Sofortige Aktivierung bei Benutzereingabe für direktes Feedback.
+- LED-Status (Priorität absteigend):
+	- THEFT_ALERT: Rot-SOS (3 kurz, 3 lang, 3 kurz) - höchste Priorität, nur wenn gesperrt und Diebstahl erkannt.
+	- COAP_ERROR: Rot - wenn WiFi verbunden aber keine CoAP-Aktivität seit >30s.
+	- INIT: Blau-Blink - während Initialisierung oder WiFi-Verbindung.
+	- SYSTEM_OK: Grün - normaler Betrieb, alle Systeme funktional.
+	- COAP_CONNECTING: Blau (veraltet, nicht mehr aktiv verwendet).
 
 Netzwerkdiagnostik
 - WLAN-Scan vor Verbindungsaufbau; klare Statuslogs (z. B. `WL_NO_SSID_AVAIL`).
@@ -75,10 +80,9 @@ Fehlerbehebung (Troubleshooting)
 - UDP-Fehler-Spam: CoAP-Loop nur bei WLAN-Verbindung ausführen.
 
 Roadmap
-- NTP-Zeitsync optional zusätzlich zur RTC.
-- Exponentielles Backoff für Reconnect, konfigurierbar.
-- Filterung/Glättung von DHT- und Bewegungsdaten.
-- Optionales Telemetrie-Buffering bei Offline-Betrieb.
+- Exponentielles Backoff für WiFi-Reconnect (aktuell fest 60s).
+- Filterung/Glättung von Bewegungsdaten für stabilere Erkennung.
+- Batteriespannungsüberwachung und Warnung bei niedrigem Ladestand.
 
 Hinweise
 - APIs: Optional geplante Nutzung externer Wetter-/Zeit-Dienste; aktuell lokal über RTC.
@@ -112,8 +116,8 @@ Für die Datenübertragung nutzt das System das CoAP-Protokoll (Constrained Appl
 Die Nutzdaten werden als kompakte JSON-Objekte formatiert. Unabhängig vom Zustand (IDLE oder ACTIVE) enthält das Datenpaket immer vollständige Informationen: Temperatur, Luftfeuchtigkeit sowie die Rohdaten der Beschleunigungs- und Gyroskopsensoren aller drei Achsen. Ein Statusfeld ("s") kennzeichnet den aktuellen Zustand: "A" für Active (Bewegung) oder "I" für Idle (Ruhe).
 
 Energie-Management
-Ein wesentlicher Aspekt der Architektur ist das Energie-Management. Das System nutzt adaptive Verzögerungen in der Hauptschleife (Loop), die je nach Systemzustand variieren – von 500 Millisekunden im aktiven Modus bis zu mehreren Sekunden im Ruhezustand. Zusätzlich wird das WiFi-Modul in den "Light Sleep"-Modus versetzt, wenn keine Datenübertragung ansteht. Dies reduziert den Stromverbrauch signifikant, während die CPU weiterhin für die Sensorüberwachung aktiv bleibt. Ein optionaler Deep-Sleep-Modus kann das System bei längerer Inaktivität in einen Tiefschlaf versetzen, aus dem es nur durch externe Ereignisse oder Timer geweckt wird.
-Zusammenfassend stellt der ESP32 Fahrrad-Computer eine integrierte Lösung dar, die lokale Echtzeitverarbeitung mit effizienter Cloud-Konnektivität verbindet und durch ihre modulare Architektur flexibel auf verschiedene Einsatzszenarien angepasst werden kann.
+Ein wesentlicher Aspekt der Architektur ist das Energie-Management. Das System nutzt adaptive Verzögerungen in der Hauptschleife (Loop), die je nach Systemzustand variieren: 20ms im ACTIVE-Zustand für schnelle Reaktion, 100ms im IDLE-Zustand für Energieeinsparung, und 1000ms im DISCONNECTED-Zustand zur Minimierung des Verbrauchs während Verbindungsversuchen. Das WiFi-Modul bleibt permanent aktiv (Light-Sleep deaktiviert), um als zuverlässiger CoAP-Server zu fungieren. Deep-Sleep ist bewusst nicht implementiert, da das System kontinuierlich für Abfragen der Android-App verfügbar sein muss.
+Zusammenfassend stellt der ESP32 Fahrrad-Computer eine integrierte Lösung dar, die lokale Echtzeitverarbeitung mit effizienter Netzwerk-Konnektivität verbindet und durch ihre modulare Architektur flexibel auf verschiedene Einsatzszenarien angepasst werden kann.
 
 ### Detaillierte Beschreibung der CoAP-Schnittstelle
 
@@ -151,17 +155,110 @@ Das Gerät agiert als **CoAP-Server** und hostet Ressourcen, die von einer Andro
 *   **Methode:** `POST`
 *   **Payload:** Text (z.B. "LOCK", "UNLOCK")
 *   **Response:** "OK" bei Erfolg
-*   **Verwendung:** Fahrrad sperren/entsperren, Diebstahlalarm zurücksetzen
+*   **Verwendung:** 
+    - **LOCK**: Aktiviert Diebstahlüberwachung (`state.locked = true`). Bei Überschreitung der Theft-Schwellwerte → `theft_detected = true` → LED-SOS-Muster.
+    - **UNLOCK**: Deaktiviert Überwachung (`state.locked = false`) und setzt Diebstahlalarm zurück (`theft_detected = false`).
 
 #### Android-Client-Implementierung:
-
-```kotlin
-// Telemetrie abrufen (Polling)
-val client = CoapClient("coap://[ESP32-IP]:5683/telemetry")
-val response = client.get()
-val json = JSONObject(response.responseText)
-
-// Befehl senden
-val cmdClient = CoapClient("coap://[ESP32-IP]:5683/cmd")
-cmdClient.post("LOCK", MediaTypeRegistry.TEXT_PLAIN)
-```
+Projektdokumentation: CycleComputer
+Version: 1.0 Datum: 11. Dezember 2025
+1. Projektübersicht
+Das Projekt "CycleComputer" ist eine native Android-Anwendung, die als Fahrradcomputer fungiert. Die App verbindet sich mit einem externen IoT-Gerät (vermutlich einem Mikrocontroller wie einem ESP32 oder Arduino) über das CoAP-Protokoll, um Echtzeit-Telemetriedaten zu empfangen und zu visualisieren. Zusätzlich kann der Benutzer Befehle an das Gerät senden, wie z.B. das Ver- oder Entriegeln eines Schlosses. Die App integriert auch Standortdienste, um die aktuelle Geschwindigkeit des Fahrrads zu schätzen und Wetterdaten für den aktuellen Standort abzurufen.
+2. Technische Architektur
+Die Anwendung basiert auf einer Single-Activity-Architektur (DataActivity.java) und nutzt moderne Android-Komponenten und Bibliotheken.
+•
+Kommunikationsprotokoll: Die Kommunikation mit dem externen Gerät erfolgt über CoAP (Constrained Application Protocol), ein leichtgewichtiges Protokoll, das ideal für IoT-Anwendungen ist. Die Implementierung wird durch die californium-core-Bibliothek realisiert.
+•
+Datenverarbeitung: Eingehende Daten vom IoT-Gerät liegen im JSON-Format vor. Die Gson-Bibliothek wird für das Parsen dieser Daten in Java-Objekte (TelemetryData) verwendet.
+•
+UI-Aktualisierung & State Management: Android Architecture Components, insbesondere LiveData und Observer, werden verwendet, um die Benutzeroberfläche reaktiv zu gestalten. Der CoapManager stellt LiveData-Objekte für Telemetriedaten und den Verbindungsstatus bereit, welche die DataActivity beobachtet und bei Änderungen die UI aktualisiert.
+•
+Standort und Geschwindigkeit: Der FusedLocationProviderClient von den Google Play Services wird genutzt, um den Gerätestandort zu ermitteln. Die Geschwindigkeit wird nicht direkt über GPS, sondern durch die Integration von Beschleunigungssensordaten berechnet. Ein Hochpassfilter trennt die lineare Beschleunigung von der Schwerkraft, um eine realistische Geschwindigkeitsabschätzung zu ermöglichen.
+•
+Netzwerkanfragen (Wetter): Für das Abrufen von Wetterdaten von einer externen API (weatherapi.com) wird die Fuel-Bibliothek eingesetzt. Dies ist eine leichtgewichtige und benutzerfreundliche HTTP-Client-Bibliothek für Kotlin/Java.
+3. Kernkomponenten
+a) DataActivity.java Dies ist die Haupt- und einzige Activity der App. Sie ist verantwortlich für:
+•
+Anzeige von Daten: Visualisierung von Temperatur, Luftfeuchtigkeit, Beschleunigung, Gyroskopwerten, Geschwindigkeit und Gerätestatus.
+•
+Benutzerinteraktionen: Verarbeitung von Klicks auf Buttons (z.B. "Sperren senden", "Rohdaten anzeigen").
+•
+Lifecycle-Management: Initialisierung und Freigabe von Ressourcen wie dem CoapManager und den Observern.
+•
+Berechtigungsmanagement: Anforderung der ACCESS_FINE_LOCATION-Berechtigung, die für den Abruf von Wetterdaten benötigt wird.
+b) CoapManager.java (Singleton) Diese zentrale Klasse kapselt die gesamte CoAP-Kommunikationslogik.
+•
+Verbindungsmanagement: Stellt eine "observe"-Beziehung zu einer Ressource auf dem CoAP-Server (dem IoT-Gerät) her.
+•
+Datenbereitstellung: Empfängt Daten vom Server und stellt sie über ein MutableLiveData<String>-Objekt bereit.
+•
+Status-Management: Verfolgt den Verbindungsstatus (IDLE, ACTIVE, DISCONNECTED) und stellt diesen ebenfalls über LiveData zur Verfügung.
+•
+Befehle senden: Bietet eine Methode (sendCommand), um PUT-Anfragen (z.B. "LOCK" / "UNLOCK") an den CoAP-Server zu senden.
+c) TelemetryData.java (Datenklasse) Eine einfache Datenklasse, die die Struktur der vom IoT-Gerät gesendeten JSON-Daten widerspiegelt. Sie enthält Felder für Temperatur, Luftfeuchtigkeit, Beschleunigungs- und Gyroskopwerte sowie einen Status.
+d) WeatherApiResponse.java (Datenklasse) Eine verschachtelte Datenklasse, die für das Parsen der JSON-Antwort der Wetter-API mit Gson verwendet wird.
+4. Abhängigkeiten (Dependencies)
+•
+androidx.appcompat: Für grundlegende UI-Komponenten und Abwärtskompatibilität.
+•
+com.google.android.material: Für moderne Material-Design-Komponenten wie SwitchCompat.
+•
+org.eclipse.californium:californium-core: Implementierung des CoAP-Protokolls.
+•
+com.google.code.gson:gson: Zum Parsen von JSON-Daten.
+•
+com.github.kittinunf.fuel:fuel: Für HTTP-Anfragen (Wetter-API).
+•
+com.google.android.gms:play-services-location: Für den Zugriff auf den Gerätestandort.
+App-Dokumentation (Benutzerhandbuch)
+1. Einleitung
+Willkommen bei der CycleComputer App! Diese App verwandelt Ihr Smartphone in eine leistungsstarke Zentrale für Ihr Fahrrad. Verbinden Sie sich mit Ihrem smarten Fahrrad-Zubehör, um Live-Daten wie Temperatur und Geschwindigkeit zu sehen, und steuern Sie Funktionen wie das digitale Schloss direkt von Ihrem Handy aus.
+2. Hauptbildschirm (DataActivity)
+Der Hauptbildschirm ist das Herzstück der App und bietet Ihnen alle wichtigen Informationen auf einen Blick. Die Hintergrundfarbe des Bildschirms signalisiert den aktuellen Verbindungsstatus:
+•
+Grau (status_idle): Die App ist bereit, hat aber noch keine aktiven Daten vom Gerät empfangen.
+•
+Grün (status_active): Eine aktive Verbindung zum Gerät besteht und Daten werden empfangen.
+•
+Rot (status_disconnected): Die Verbindung zum Gerät wurde unterbrochen.
+3. Angezeigte Daten
+•
+Gerätestatus: Zeigt den aktuellen Status des verbundenen Geräts an (z.B. "ACTIVE" oder "IDLE").
+•
+Geschwindigkeit: Ihre aktuelle Fahrgeschwindigkeit, berechnet in Kilometern pro Stunde (km/h).
+•
+Wetter: Das aktuelle Wetter an Ihrem Standort (z.B. "Sonnig", "Leichter Regen"). Hierfür ist eine Standortfreigabe erforderlich.
+•
+Temperatur: Die vom Sensor gemessene Umgebungstemperatur in Grad Celsius (°C).
+•
+Luftfeuchtigkeit: Die vom Sensor gemessene relative Luftfeuchtigkeit in Prozent (%).
+4. Steuerelemente
+•
+Sperren / Entsperren (Schalter):
+◦
+Mit dem Schalter können Sie den Zustand eines digitalen Schlosses an Ihrem Fahrrad steuern.
+◦
+Position "An" (aktiviert): Das Schloss ist verriegelt.
+◦
+Position "Aus" (deaktiviert): Das Schloss ist entriegelt.
+•
+Befehl senden (Button):
+◦
+Nachdem Sie den Zustand des Schalters geändert haben, tippen Sie auf diesen Button, um den Befehl ("LOCK" oder "UNLOCK") an Ihr Fahrrad zu senden.
+•
+Rohdaten anzeigen/verbergen (Button):
+◦
+Für technisch interessierte Benutzer. Ein Tipp auf diesen Button blendet die detaillierten Rohdaten der Sensoren ein oder aus:
+▪
+Beschleunigung (Accel): Die Messwerte der X-, Y- und Z-Achse des Beschleunigungssensors.
+▪
+Gyroskop (Gyro): Die Messwerte der X-, Y- und Z-Achse des Gyroskops.
+5. Erstmalige Einrichtung und Berechtigungen
+Beim ersten Start der App werden Sie aufgefordert, die Berechtigung für den Standortzugriff (ACCESS_FINE_LOCATION) zu erteilen. Diese Berechtigung wird ausschließlich benötigt, um die aktuellen Wetterdaten für Ihren Standort abzurufen. Wenn Sie die Berechtigung nicht erteilen, wird anstelle des Wetters "N/A" (nicht verfügbar) angezeigt.
+6. Fehlerbehandlung
+•
+"Fehler: Ungültige JSON-Daten": Diese Meldung erscheint, wenn die App Daten vom Gerät in einem unerwarteten Format empfängt. Stellen Sie sicher, dass die Firmware Ihres IoT-Geräts korrekt funktioniert.
+•
+Wetter "N/A": Dies kann auftreten, wenn Sie die Standortberechtigung verweigert haben, Ihr Gerät keine Standortinformationen liefern kann oder keine Internetverbindung besteht.
+•
+Roter Hintergrund: Wenn der Bildschirm rot wird, ist die Verbindung zum Fahrrad-Zubehör unterbrochen. Überprüfen Sie, ob das Gerät eingeschaltet und in Reichweite ist.
