@@ -364,7 +364,9 @@ namespace Network {
     // Track disconnect time for power management
     if (was_connected && !state.wifi_connected) {
       state.wifi_disconnect_time = now;
-      Serial.println("WiFi disconnected - starting disconnect timer");
+      // Stop UDP socket immediately when WiFi disconnects to prevent errors
+      udp.stop();
+      Serial.println("WiFi disconnected - UDP stopped");
     } else if (!was_connected && state.wifi_connected) {
       state.wifi_disconnect_time = 0;
       PowerMgmt::enableWiFiLightSleep();
@@ -375,8 +377,7 @@ namespace Network {
       Serial.printf("WiFi reconnected - IP: %s\n", local_ip.toString().c_str());
       
       // Fully restart UDP and CoAP server to clear stale socket state
-      udp.stop();
-      delay(100); // Allow socket cleanup
+      delay(100); // Allow network stack to stabilize
       coap.start();
       coap.server(callback_telemetry, "telemetry");
       coap.server(callback_cmd, "cmd");
@@ -386,10 +387,14 @@ namespace Network {
     // Attempt reconnection with power-aware timing
     if (!state.wifi_connected && 
         (now - state.last_wifi_retry) > Config::WIFI_RETRY_INTERVAL_MS) {
-      Serial.println("Attempting WiFi reconnection...");
-      state.last_wifi_retry = now;
-      WiFi.reconnect();
-      
+      // Only attempt if not already trying to connect
+      wl_status_t status = WiFi.status();
+      if (status == WL_DISCONNECTED || status == WL_CONNECTION_LOST || status == WL_CONNECT_FAILED) {
+        Serial.println("Attempting WiFi reconnection...");
+        state.last_wifi_retry = now;
+        // Use non-blocking begin instead of reconnect to avoid UI lag
+        WiFi.begin(Config::WIFI_SSID, Config::WIFI_PASSWORD);
+      }
     }
     
     // Reduce CoAP loop frequency to prevent UDP errors
