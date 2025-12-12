@@ -14,6 +14,8 @@ Hardware
 - Anzeige: 16x2 I2C LCD (`LiquidCrystal_I2C`).
 - LED: RGB-LED für Statusmeldungen (Rot/Blau/Grün, SOS-Pattern bei Diebstahl).
 - Button: Seitenwechsel und Backlight-Aktivierung; konfigurierbar per `Config::BUTTON_PULLUP` (true=Pull-up, false=Pull-down).
+  - Erste Taste nach LCD-Timeout: Nur Backlight aktivieren, keine Seitenwechsel.
+  - Nachfolgende Tasten: Normale Seitenwechsel-Funktion.
 
 Software & Bibliotheken
 - PlatformIO-Projekt mit Arduino-Core.
@@ -28,10 +30,14 @@ Zustände & Logik
 
 Sensorik
 - DHT22: Gelesen mit `Config::DHT_READ_MS`-Throttling (2000ms); Initialcheck im Setup (OK/FAILED).
+  - Fallback-Werte bei Ausfall: 20.0°C Temperatur, 50% Luftfeuchtigkeit.
 - MPU6050: Bewegungsdetektion über Magnituden von Beschleunigung und Gyro; Schwellwerte konfigurierbar.
-- Bewegung: `MOVEMENT_ACCEL_THRESHOLD` (2.0 m/s²), `MOVEMENT_GYRO_THRESHOLD` (5.0 rad/s); Timeout `MOVEMENT_TIMEOUT_MS` (10s).
-- Diebstahl: Separate höhere Schwellwerte (`THEFT_THRESHOLD_X/Y/Z`, `GYRO_THEFT_THRESHOLD`); nur aktiv wenn `state.locked == true`.
+  - Achsen-Mapping: Z→X, Y→Y, X→Z (für korrekte Orientierung am Fahrrad).
+  - Fallback-Werte bei Ausfall: ax=0.0, ay=0.0, az=9.81, gx/gy/gz=0.0.
+- Bewegung: `MOVEMENT_ACCEL_THRESHOLD` (1.0 m/s²), `MOVEMENT_GYRO_THRESHOLD` (5.0 rad/s); Timeout `MOVEMENT_TIMEOUT_MS` (10s).
+- Diebstahlschutz: Verwendet gleiche Bewegungserkennung wie normale Bewegung; nur aktiv wenn `state.locked == true`.
   - LOCK-Befehl aktiviert Überwachung, UNLOCK deaktiviert und setzt Alarm zurück.
+  - Bei Bewegung im gesperrten Zustand: `theft_detected = true` → LED-SOS-Pattern.
 
 Kommunikation (CoAP-Server)
 - ESP32 agiert als CoAP-Server auf Port 5683.
@@ -67,7 +73,10 @@ Anzeige & LED
 
 Netzwerkdiagnostik
 - WLAN-Scan vor Verbindungsaufbau; klare Statuslogs (z. B. `WL_NO_SSID_AVAIL`).
-- Reconnect-Backoff: alle 10 Minuten; CoAP erst nach erfolgreichem WLAN-Connect starten.
+- Auto-Reconnect: Beim Boot deaktiviert für kontrollierte Verbindungsversuche; nach erfolgreicher Verbindung automatisch aktiviert.
+- Manuelle Reconnect-Versuche: alle 60 Sekunden wenn nicht verbunden.
+- UDP-Socket wird bei Disconnect sofort gestoppt und bei Reconnect vollständig neu initialisiert.
+- CoAP-Server erst nach erfolgreichem WLAN-Connect gestartet.
 
 Build & Deployment
 - PlatformIO: Build, Upload, serielle Logs für Diagnose.
@@ -138,15 +147,16 @@ Das Gerät agiert als **CoAP-Server** und hostet Ressourcen, die von einer Andro
 *   **Payload-Struktur:**
     ```json
     {
-      "t": 24.5,    // Temperatur (Celsius)
-      "h": 55.2,    // Luftfeuchtigkeit (%)
-      "ax": 0.12,   // Beschleunigung X (m/s²)
-      "ay": -0.05,  // Beschleunigung Y (m/s²)
-      "az": 0.98,   // Beschleunigung Z (m/s²)
-      "gx": 0.01,   // Gyro X (rad/s)
-      "gy": 0.02,   // Gyro Y (rad/s)
-      "gz": -0.01,  // Gyro Z (rad/s)
-      "s": "A"      // Status: "A" für Active, "I" für Idle
+      "t": 24.5,       // Temperatur (Celsius)
+      "h": 55.2,       // Luftfeuchtigkeit (%)
+      "ax": 0.12,      // Beschleunigung X (m/s²)
+      "ay": -0.05,     // Beschleunigung Y (m/s²)
+      "az": 0.98,      // Beschleunigung Z (m/s²)
+      "gx": 0.01,      // Gyro X (rad/s)
+      "gy": 0.02,      // Gyro Y (rad/s)
+      "gz": -0.01,     // Gyro Z (rad/s)
+      "theft": "N",   // Diebstahlstatus: "Y" = erkannt, "N" = nicht erkannt
+      "s": "A"         // Status: "A" für Active, "I" für Idle
     }
     ```
 
