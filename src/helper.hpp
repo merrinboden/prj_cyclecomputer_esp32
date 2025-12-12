@@ -61,12 +61,8 @@ namespace Config {
   constexpr uint32_t SLEEP_THRESHOLD_MS = 300000; // 10s disconnected = sleep
   constexpr uint32_t MOVEMENT_TIMEOUT_MS = 10000; // 10s no movement = idle
   constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 60000; // 1 min retry when disconnected
-  constexpr float MOVEMENT_ACCEL_THRESHOLD = 2.0f; // m/s² for movement detection
+  constexpr float MOVEMENT_ACCEL_THRESHOLD = 1.0f; // m/s² for movement detection
   constexpr float MOVEMENT_GYRO_THRESHOLD = 5.0f;  // rad/s for movement detection
-  constexpr float MOVEMENT_ACCEL_THEFT_THRESHOLD_X = 12.0f; // m/s² for movement detection
-  constexpr float MOVEMENT_ACCEL_THEFT_THRESHOLD_Y = 2.0f; // m/s² for movement detection
-  constexpr float MOVEMENT_ACCEL_THEFT_THRESHOLD_Z = 2.0f; // m/s² for movement detection
-  constexpr float MOVEMENT_GYRO_THEFT_THRESHOLD = 5.0f;  // rad/s for movement detection
 
   // Button settings
   constexpr uint8_t TOTAL_PAGES = 4;
@@ -107,9 +103,6 @@ struct SystemState {
   uint32_t wifi_disconnect_time = 0;
   uint32_t last_wifi_retry = 0;
   bool is_moving = false;
-  float speed_kmh = 0.0f;
-  float elevationChange = 0.0f;
-  float movement_magnitude = 0.0f;
   uint8_t ui_page = 0;
   
   // LED state
@@ -209,8 +202,6 @@ namespace Utils {
     float accel_mag = sqrtf(sensors.accel_x*sensors.accel_x + sensors.accel_y*sensors.accel_y + sensors.accel_z*sensors.accel_z);
     float gyro_mag = sqrtf(sensors.gyro_x*sensors.gyro_x + sensors.gyro_y*sensors.gyro_y + sensors.gyro_z*sensors.gyro_z);
     
-    state.movement_magnitude = accel_mag;
-    
     bool movement = (accel_mag > (9.81f + Config::MOVEMENT_ACCEL_THRESHOLD) || 
                     accel_mag < (9.81f - Config::MOVEMENT_ACCEL_THRESHOLD)) ||
                    (gyro_mag > Config::MOVEMENT_GYRO_THRESHOLD);
@@ -224,12 +215,6 @@ namespace Utils {
     state.is_moving = (now - state.last_movement_time) < Config::MOVEMENT_TIMEOUT_MS;
     
     return movement;
-  }
-  
-  // Theft detection based on excessive motion
-  inline bool isTheftDetected(const SensorData& sensors) {
-    return (fabsf(sensors.accel_x) > Config::MOVEMENT_ACCEL_THEFT_THRESHOLD_X || fabsf(sensors.accel_y) > Config::MOVEMENT_ACCEL_THEFT_THRESHOLD_Y || fabsf(sensors.accel_z) > Config::MOVEMENT_ACCEL_THEFT_THRESHOLD_Z || 
-            fabsf(sensors.gyro_x) > Config::MOVEMENT_GYRO_THEFT_THRESHOLD || fabsf(sensors.gyro_y) > Config::MOVEMENT_GYRO_THEFT_THRESHOLD || fabsf(sensors.gyro_z) > Config::MOVEMENT_GYRO_THEFT_THRESHOLD);
   }
   
   // Format display string to 16 characters
@@ -261,10 +246,11 @@ namespace Network {
     else if (state.current_state == 2) stateChar = "I"; // IDLE
     
     snprintf(payload, sizeof(payload),
-             "{\"t\":%.1f,\"h\":%.1f,\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,\"s\":\"%s\"}",
+             "{\"t\":%.1f,\"h\":%.1f,\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,\"theft\":\"%s\",\"s\":\"%s\"}",
              sensors.temperature, sensors.humidity,
              sensors.accel_x, sensors.accel_y, sensors.accel_z,
              sensors.gyro_x, sensors.gyro_y, sensors.gyro_z,
+             state.theft_detected ? "Y" : "N",
              stateChar);
              
     coap.sendResponse(ip, port, packet.messageid, payload, strlen(payload), COAP_CONTENT, COAP_APPLICATION_JSON, packet.token, packet.tokenlen);
@@ -548,25 +534,38 @@ namespace StateMachine {
       // Read sensors based on availability - sensors passed as parameters
 
       // DHT sensors must not be read too frequently; enforce DHT_READ_MS
-      if (sensors.dht_ok && (int32_t)(now - last_dht_read) >= (int32_t)Config::DHT_READ_MS) {
-        sensors_event_t temp_event, hum_event;
-        dht.temperature().getEvent(&temp_event);
-        if (!isnan(temp_event.temperature)) sensors.temperature = temp_event.temperature;
-        dht.humidity().getEvent(&hum_event);
-        if (!isnan(hum_event.relative_humidity)) sensors.humidity = hum_event.relative_humidity;
+      if (sensors.dht_ok) {
+        if ((int32_t)(now - last_dht_read) >= (int32_t)Config::DHT_READ_MS) {
+          sensors_event_t temp_event, hum_event;
+          dht.temperature().getEvent(&temp_event);
+          if (!isnan(temp_event.temperature)) sensors.temperature = temp_event.temperature;
+          dht.humidity().getEvent(&hum_event);
+          if (!isnan(hum_event.relative_humidity)) sensors.humidity = hum_event.relative_humidity;
+          last_dht_read = now;
+        }
+      } else {
+        sensors.temperature = 20.0;
+        sensors.humidity = 50.0;
         last_dht_read = now;
       }
 
       if (sensors.mpu_ok) {
         sensors_event_t accel_event, gyro_event, temp_event;
         if (mpu.getEvent(&accel_event, &gyro_event, &temp_event)) {
-          sensors.accel_x = accel_event.acceleration.x;
+          sensors.accel_x = accel_event.acceleration.z;
           sensors.accel_y = accel_event.acceleration.y;
-          sensors.accel_z = accel_event.acceleration.z;
-          sensors.gyro_x = gyro_event.gyro.x;
+          sensors.accel_z = accel_event.acceleration.x;
+          sensors.gyro_x = gyro_event.gyro.z;
           sensors.gyro_y = gyro_event.gyro.y;
-          sensors.gyro_z = gyro_event.gyro.z;
+          sensors.gyro_z = gyro_event.gyro.x;
         }
+      } else {
+        sensors.accel_x = 0.0;
+        sensors.accel_y = 0.0;
+        sensors.accel_z = 9.81;
+        sensors.gyro_x = 0.0;
+        sensors.gyro_y = 0.0;
+        sensors.gyro_z = 0.0;
       }
 
       next_sensor_read = now + sensor_interval;
@@ -593,9 +592,9 @@ namespace LED {
   inline void updateStatus(SystemState& state, const SensorData& sensors, uint32_t now) {
     // Determine LED status
     if (state.locked){
-      if (Utils::isTheftDetected(sensors)) {
-        state.theft_detected = true;
-      }
+      if (Utils::detectMovement(sensors, state, now)) state.theft_detected = true;
+    } else {
+      state.theft_detected = false;
     }
     
     if (state.theft_detected) {
