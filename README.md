@@ -36,19 +36,23 @@ Projektziel: Entwicklung eines stromsparenden Fahrrad-Computers auf ESP32-Basis 
 ## Sensorik
 
 ### DHT22
+
 - Gelesen mit `Config::DHT_READ_MS`-Throttling (2000ms); Initialcheck im Setup (OK/FAILED)
 - Fallback-Werte bei Ausfall: 20.0°C Temperatur, 50% Luftfeuchtigkeit
 
 ### MPU6050
+
 - Bewegungsdetektion über Magnituden von Beschleunigung und Gyro; Schwellwerte konfigurierbar
 - Achsen-Mapping: Z→X, Y→Y, X→Z (für korrekte Orientierung am Fahrrad)
 - Fallback-Werte bei Ausfall: ax=0.0, ay=0.0, az=9.81, gx/gy/gz=0.0
 
 ### Bewegungserkennung
+
 - `MOVEMENT_ACCEL_THRESHOLD` (1.0 m/s²), `MOVEMENT_GYRO_THRESHOLD` (5.0 rad/s)
 - Timeout `MOVEMENT_TIMEOUT_MS` (10s)
 
 ### Diebstahlschutz
+
 - Verwendet gleiche Bewegungserkennung wie normale Bewegung; nur aktiv wenn `state.locked == true`
 - LOCK-Befehl aktiviert Überwachung, UNLOCK deaktiviert und setzt Alarm zurück
 - Bei Bewegung im gesperrten Zustand: `theft_detected = true` → LED-SOS-Pattern
@@ -60,6 +64,7 @@ ESP32 agiert als CoAP-Server auf Port 5683.
 ### Ressourcen
 
 **`/telemetry` (GET)**: Liefert aktuelle Sensordaten als JSON
+
 ```json
 {
   "t": 24.5,       // Temperatur (Celsius)
@@ -76,10 +81,12 @@ ESP32 agiert als CoAP-Server auf Port 5683.
 ```
 
 **`/cmd` (POST)**: Empfängt Befehle (z.B. "LOCK", "UNLOCK")
+
 - **LOCK**: Aktiviert Diebstahlüberwachung (`state.locked = true`)
 - **UNLOCK**: Deaktiviert Überwachung (`state.locked = false`) und setzt Diebstahlalarm zurück
 
 ### Android-App Integration
+
 - Android-App pollt Daten nach Bedarf (empfohlen: 1-2s Intervall)
 - CoAP-Loop läuft mit 100ms Intervall für responsive Serverantworten
 - Re-Init von CoAP-Server nach WLAN-Reconnect
@@ -94,6 +101,7 @@ ESP32 agiert als CoAP-Server auf Port 5683.
 ### Stromverbrauch & Batterielaufzeit-Schätzungen
 
 **Komponentenverbrauch (typische Werte)**:
+
 - ESP32 (240 MHz, WiFi aktiv, kein Sleep): ~160-240 mA
 - ESP32 (240 MHz, WiFi aktiv, Light Sleep): ~20-30 mA (nicht verwendet)
 - WiFi TX/RX Spitzen: bis 400 mA kurzzeitig
@@ -105,6 +113,7 @@ ESP32 agiert als CoAP-Server auf Port 5683.
 - RGB LED (eine Farbe): ~5-20 mA (je nach Helligkeit)
 
 **Durchschnittlicher Verbrauch nach Zustand**:
+
 1. **IDLE** (WiFi verbunden, LCD Backlight aus, Sensoren 1 Hz): ~197 mA
 2. **ACTIVE** (WiFi verbunden, LCD Backlight an, Sensoren 5 Hz): ~239 mA
 3. **DISCONNECTED** (WiFi Reconnect-Versuche, LCD Backlight aus): ~165 mA
@@ -120,11 +129,13 @@ ESP32 agiert als CoAP-Server auf Port 5683.
 | 10000 mAh      | 45,5 h                 | 55,2 h               | 47,2 h                  |
 
 **Hinweise**:
+
 - Reale Laufzeit liegt ca. 80-85% der berechneten Werte (Batterie-Effizienz, Spannungswandler-Verluste)
 - CoAP-Polling-Frequenz der Android-App beeinflusst WiFi-Aktivität und Verbrauch
 - LCD-Backlight-Nutzung hat signifikanten Einfluss (~25 mA Unterschied)
 
 **Optimierungsempfehlungen**:
+
 - LCD-Backlight möglichst kurz nutzen (30s Timeout ist sinnvoll)
 - Bei Nichtnutzung: System in DISCONNECTED-Modus versetzen (WiFi aus)
 - Für längere Überwachung: Externe Stromversorgung (USB) empfohlen
@@ -133,17 +144,20 @@ ESP32 agiert als CoAP-Server auf Port 5683.
 ## Anzeige & LED
 
 ### LCD-Pages
+
 - Zeit/Datum (RTC)
 - Umwelt (Temperatur, Luftfeuchte + DHT-Status)
 - Bewegung (Accel/Gyro live)
 - Netzwerk/State (WiFi-Status, lokale IP)
 
 ### LCD-Hintergrundbeleuchtung
+
 - Automatisches Timeout nach 30 Sekunden Inaktivität
 - Reaktivierung durch Tastendruck
 - Sofortige Aktivierung bei Benutzereingabe für direktes Feedback
 
 ### LED-Status (Priorität absteigend)
+
 - **THEFT_ALERT**: Rot-SOS (3 kurz, 3 lang, 3 kurz) - höchste Priorität, nur wenn gesperrt und Diebstahl erkannt
 - **COAP_ERROR**: Rot - wenn WiFi verbunden aber keine CoAP-Aktivität seit >30s
 - **INIT**: Blau-Blink - während Initialisierung oder WiFi-Verbindung
@@ -162,6 +176,7 @@ ESP32 agiert als CoAP-Server auf Port 5683.
 **PlatformIO**: Build, Upload, serielle Logs für Diagnose
 
 ### VS Code (empfohlen)
+
 ```bash
 # PlatformIO Extension installieren, dann:
 # Build: PlatformIO: Build
@@ -170,6 +185,7 @@ ESP32 agiert als CoAP-Server auf Port 5683.
 ```
 
 ### PlatformIO CLI (PowerShell)
+
 ```powershell
 pio run
 pio run -t upload
@@ -221,13 +237,16 @@ Das System nutzt adaptive Verzögerungen in der Hauptschleife (Loop), die je nac
 
 ## Android-Client-Implementierung
 
-### Projektdokumentation: CycleComputer
-**Version**: 2.0 | **Datum**: 11. Dezember 2025
+### Projektdokumentation: App zum CycleComputer
+
+**Version**: 1.0 | **Datum**: 11. Dezember 2025
 
 #### 1. Projektübersicht
+
 Das Projekt "CycleComputer" ist eine native Android-Anwendung, die als umfassender Fahrradcomputer dient. Die App verbindet sich über das CoAP-Protokoll mit einem externen IoT-Gerät (z.B. einem ESP32-Mikrocontroller), um Echtzeit-Telemetriedaten zu empfangen und zu visualisieren. Zu den erfassten Daten gehören Temperatur, Luftfeuchtigkeit, Beschleunigungs- und Gyroskopwerte sowie ein Diebstahl- und Gerätestatus. Benutzer können Befehle an das Gerät senden, wie das Ver- oder Entriegeln eines digitalen Schlosses. Die App integriert außerdem Standortdienste, um die aktuelle Geschwindigkeit zu berechnen und detaillierte Wetterdaten für den aktuellen Standort abzurufen.
 
 #### 2. Technische Architektur
+
 Die Anwendung folgt einer Single-Activity-Architektur (DataActivity.java) und nutzt moderne Android-Komponenten und Bibliotheken:
 
 - **Kommunikationsprotokoll**: CoAP (californium-core-Bibliothek)
@@ -249,12 +268,15 @@ Die Anwendung folgt einer Single-Activity-Architektur (DataActivity.java) und nu
 ### App-Dokumentation (Benutzerhandbuch)
 
 #### Hauptbildschirm & Statusanzeige
+
 Die Hintergrundfarbe signalisiert den Verbindungsstatus:
+
 - **Grau**: App bereit, keine aktiven Daten
 - **Grün**: Aktive Verbindung, Daten werden empfangen
 - **Rot**: Verbindung unterbrochen
 
 #### Angezeigte Daten
+
 - **DIEBSTAHL!**: Auffälliger roter Text bei Diebstahlaktivität (theft = "Y")
 - **Gerätestatus**: Betriebsstatus (z.B. "ACTIVE" oder "IDLE")
 - **Geschwindigkeit**: Aktuelle Fahrgeschwindigkeit in km/h
@@ -263,16 +285,19 @@ Die Hintergrundfarbe signalisiert den Verbindungsstatus:
 - **Luftfeuchtigkeit**: Relative Luftfeuchtigkeit in %
 
 #### Steuerelemente
+
 - **Sperren/Entsperren (Schalter)**: Wählt gewünschten Zustand des digitalen Schlosses
 - **SENDE BEFEHL (Button)**: Sendet "LOCK" oder "UNLOCK" Befehl an Fahrrad
 - **ROHDATEN ANZEIGEN/VERBERGEN (Button)**: Blendet detaillierte Sensordaten ein/aus (Beschleunigung X/Y/Z, Gyroskop X/Y/Z)
 
 #### Berechtigungen
+
 Beim ersten Start wird Standortzugriff (ACCESS_FINE_LOCATION) benötigt für präzise Wetterdaten. Bei Verweigerung erscheint "N/A" als Wetter.
 
 ---
 
 **Hinweise**:
+
 - APIs: Optional geplante Nutzung externer Wetter-/Zeit-Dienste; aktuell lokal über RTC
 - Zielkriterium: stabiles, energieeffizientes Laufverhalten (>1 h) mit verlässlicher Anzeige/Telemetrie
 - Made for coursework/experimentation; adapt to your hardware
